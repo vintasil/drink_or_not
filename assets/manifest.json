@@ -1,0 +1,24 @@
+{
+  "actions": {
+    "idle": {
+      "count": 36,
+      "fps": 20,
+      "dir": "frames",
+      "pattern": "idle_{:02d}.png"
+    }
+  },
+  "canvas": [
+    428,
+    355
+  ],
+  "anchor": [
+    214,
+    321
+  ],
+  "bbox": [
+    12,
+    13,
+    407,
+    323
+  ]
+}
