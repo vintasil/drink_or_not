@@ -14,17 +14,33 @@ from typing import List, Optional
 
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBitmap, QPainter, QPixmap, QRegion
-from PyQt5.QtWidgets import QApplication, QMenu, QWidget
+from PyQt5.QtWidgets import QAction, QActionGroup, QApplication, QMenu, QWidget
 
-from . import messages
+from . import messages, sprite_library
 from .bubble import Bubble
-from .resources import assets_dir
 
 log = logging.getLogger(__name__)
 
 BUBBLE_AREA_H = 150  # 气泡区常驻高度,不随宠物缩放,免得缩小后字看不清
 BUBBLE_MIN_W = 300  # 窗口最小宽度,保证长句子不会被挤成一列
 EDGE_MARGIN = 60  # 首次启动时离屏幕边缘的距离
+
+
+def fill_sprite_menu(menu: QMenu, current_id: str, on_pick) -> None:
+    """把素材库里的形象填成一组单选菜单项,当前生效的那个打勾。
+
+    宠物右键菜单和托盘菜单共用这一份。托盘那个菜单是常驻的,所以列表会在每次弹出前
+    重新填一遍(见 tray._fill_sprite_menu),导入/删除后不用专门去通知它。
+    """
+    group = QActionGroup(menu)
+    group.setExclusive(True)
+    for info in sprite_library.list_sprites():
+        action = QAction(info.name, menu)
+        action.setCheckable(True)
+        action.setChecked(info.id == current_id)
+        action.triggered.connect(lambda _checked=False, sid=info.id: on_pick(sid))
+        group.addAction(action)
+        menu.addAction(action)
 
 
 class SpriteSet:
@@ -37,9 +53,12 @@ class SpriteSet:
         self.bbox = bbox
 
     @classmethod
-    def load(cls, scale: float) -> "SpriteSet":
-        base = assets_dir()
-        manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
+    def load(cls, sprite_id: str, scale: float) -> "SpriteSet":
+        base = sprite_library.sprite_dir(sprite_id)
+        try:
+            manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"形象 {sprite_id} 读不出来:{exc}") from exc
         idle = manifest["actions"]["idle"]
         size = QSize(*manifest["canvas"])
         target = QSize(max(1, round(size.width() * scale)), max(1, round(size.height() * scale)))
@@ -67,12 +86,17 @@ class PetWindow(QWidget):
     help_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     test_requested = pyqtSignal(str)
+    sprite_switch_requested = pyqtSignal(str)  # 形象 id
+    sprite_import_requested = pyqtSignal()
+    sprite_manage_requested = pyqtSignal()
     bubble_action = pyqtSignal(str, str)  # (kind, 按钮文字)
 
     def __init__(self, cfg: dict):
         super().__init__()
         self.cfg = cfg
-        self.sprites = SpriteSet.load(cfg["pet"]["scale"])
+        # 配置里记的形象可能已经被删了,这里先归一化,免得刚启动就崩在读图上
+        self.sprite_id = sprite_library.ensure_available(cfg["pet"]["sprite"])
+        self.sprites = SpriteSet.load(self.sprite_id, cfg["pet"]["scale"])
         self.bubble = Bubble()
         self.current_kind = ""
         self._frame = 0
@@ -221,15 +245,29 @@ class PetWindow(QWidget):
         test.addAction(messages.TITLE["daily_report"], lambda: self.test_requested.emit("daily_report"))
         test.addAction(messages.TITLE["startup"], lambda: self.test_requested.emit("startup"))
         menu.addSeparator()
+        self._add_sprite_menu(menu)
+        menu.addSeparator()
         menu.addAction("退出", self.quit_requested.emit)
         menu.exec_(event.globalPos())
 
+    def _add_sprite_menu(self, parent: QMenu) -> None:
+        """形象子菜单。列表在弹出时才现取,所以别处导入/删除了不用通知这里刷新。"""
+        sub = parent.addMenu("更换形象")
+        fill_sprite_menu(sub, self.sprite_id, self.sprite_switch_requested.emit)
+        sub.addSeparator()
+        sub.addAction("导入图片…", self.sprite_import_requested.emit)
+        sub.addAction("管理素材库…", self.sprite_manage_requested.emit)
+
     def apply_config(self, cfg: dict) -> None:
-        """设置改完之后热应用:缩放进去了就得重算画布和遮罩。"""
-        needs_relayout = cfg["pet"]["scale"] != self.cfg["pet"]["scale"]
+        """设置改完之后热应用:缩放或形象变了都得重算画布和遮罩。"""
+        want_sprite = sprite_library.ensure_available(cfg["pet"]["sprite"])
+        needs_reload = (
+            want_sprite != self.sprite_id or cfg["pet"]["scale"] != self.cfg["pet"]["scale"]
+        )
         self.cfg = cfg
-        if needs_relayout:
-            self.sprites = SpriteSet.load(cfg["pet"]["scale"])
+        if needs_reload:
+            self.sprite_id = want_sprite
+            self.sprites = SpriteSet.load(self.sprite_id, cfg["pet"]["scale"])
             self._frame = 0
             self._relayout()
             self._build_bubble_region()

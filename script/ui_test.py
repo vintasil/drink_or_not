@@ -1,25 +1,30 @@
-"""设置窗口 / 自启 / 气泡命中 这三块的离线冒烟。
+"""设置窗口 / 自启 / 气泡命中 / 形象素材库 这几块的离线冒烟。
 
 e2e_test.py 只跑到"调度→判定→记录",这里补上剩下没被跑到的部分:设置窗口改完
-能不能原样收回来、自启写没写对地方、气泡按钮的命中区对不对。
+能不能原样收回来、自启写没写对地方、气泡按钮的命中区对不对、导入的形象能不能
+落盘/加载/切换/删除。
 
     uv run python script/ui_test.py
 """
 
+import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 TMP = tempfile.mkdtemp(prefix="drink_ui_")
 os.environ["XDG_CONFIG_HOME"] = TMP
 os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
+from PIL import Image, ImageDraw  # noqa: E402
 from PyQt5.QtCore import QPoint, QRect, QTime  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 from drink_or_not import autostart, config as config_mod  # noqa: E402
+from drink_or_not import resources, sprite_convert, sprite_library  # noqa: E402
 from drink_or_not.bubble import Bubble  # noqa: E402
-from drink_or_not.pet_window import PetWindow  # noqa: E402
+from drink_or_not.pet_window import PetWindow, SpriteSet  # noqa: E402
 from drink_or_not.settings_dialog import SettingsDialog  # noqa: E402
 
 failures = []
@@ -154,7 +159,13 @@ old_w = pet.win_w
 grow = config_mod.deep_merge(tight, {"pet": {"scale": 1.0}})
 pet.apply_config(grow)
 check(pet.win_w > old_w, "放大后窗口变宽", f"{old_w} → {pet.win_w}")
-check(pet.sprites.canvas.width() == round(428 * 1.0), "画布按 1.0 重算", str(pet.sprites.canvas.width()))
+# 跟内置 manifest 的 canvas 比,别写死数字:写死过一版 428 其实抄的是高度不是宽度
+builtin_canvas = json.loads((resources.assets_dir() / "manifest.json").read_text(encoding="utf-8"))["canvas"]
+check(
+    [pet.sprites.canvas.width(), pet.sprites.canvas.height()] == builtin_canvas,
+    "画布按 1.0 重算",
+    f"{pet.sprites.canvas.width()}x{pet.sprites.canvas.height()}",
+)
 
 # 跨屏记忆:换过显示器后保存的位置要能回落到默认位
 off_screen = config_mod.deep_merge(tight, {"pet": {"pos": [99999, 99999]}})
@@ -165,6 +176,116 @@ check(pet._on_screen(pet.pos()), "离屏坐标被纠正回可见区", str((pet.p
 before = config_mod.load()["pet"]["pos"]
 pet.save_position()
 check(config_mod.load()["pet"]["pos"] == before, "save_position 只改内存,不写盘")
+
+# ---------- 形象素材库 ----------
+print("\n[形象素材库]")
+initial = sprite_library.list_sprites()
+check(len(initial) == 1 and initial[0].id == "default", "初始只有内置形象", str([s.id for s in initial]))
+check(initial[0].builtin is True, "内置形象带 builtin 标记")
+check(sprite_library.sprite_dir("default") == resources.assets_dir(), "内置形象直接指向随包 assets")
+
+# 纯色背景 + 主体:走抠图这条路
+plain = Path(TMP) / "plain.png"
+img = Image.new("RGB", (160, 160), (255, 255, 255))
+ImageDraw.Draw(img).ellipse((40, 30, 120, 130), fill=(200, 60, 60))
+img.save(plain)
+
+prepared = sprite_convert.prepare(plain)
+check(not prepared.problems, "纯色背景抠图通过自检", "; ".join(prepared.problems))
+check(not prepared.used_alpha, "RGB 输入没走 alpha 那条路")
+check(len(prepared.frames) == sprite_convert.COUNT, "生成了 36 帧", str(len(prepared.frames)))
+
+info = sprite_library.install(prepared, "测试形象")
+check(info.id != "default", "落盘拿到新 id", info.id)
+check((sprite_library.sprite_dir(info.id) / "manifest.json").is_file(), "manifest 已写出")
+check((sprite_library.sprite_dir(info.id) / "source.png").is_file(), "原图已存档,便于重新转换")
+check(
+    len(list((sprite_library.sprite_dir(info.id) / "frames").glob("*.png"))) == sprite_convert.COUNT,
+    "帧文件数量对",
+)
+check(not list(sprite_library.sprites_root().glob("*" + sprite_library.PART_SUFFIX)), "没有残留的 .part 目录")
+
+listed = sprite_library.list_sprites()
+check(len(listed) == 2 and listed[0].id == "default", "新形象排在内置之后", str([s.id for s in listed]))
+check(listed[1].name == "测试形象", "显示名来自 manifest", listed[1].name)
+
+# 重名:目录加 -2 后缀,显示名必须跟着变,否则菜单里两个条目长得一模一样
+dup = sprite_library.install(prepared, "测试形象")
+check(dup.id != info.id, "重名拿到不同的 id", f"{info.id} / {dup.id}")
+check(dup.name == dup.id, "重名的显示名跟着 id 走", dup.name)
+check([s.name for s in sprite_library.list_sprites()] == ["魔法猫（内置）", "测试形象", dup.id], "菜单里三个名字互不相同")
+sprite_library.delete_sprite(dup.id)
+
+custom_manifest = json.loads(
+    (sprite_library.sprite_dir(info.id) / "manifest.json").read_text(encoding="utf-8")
+)
+custom = SpriteSet.load(info.id, 1.0)
+check(
+    [custom.canvas.width(), custom.canvas.height()] == custom_manifest["canvas"],
+    "自定义形象能加载,画布与 manifest 一致",
+    f"{custom.canvas.width()}x{custom.canvas.height()}",
+)
+
+# 换到自定义形象,再换回来
+pet.apply_config(config_mod.deep_merge(tight, {"pet": {"sprite": info.id}}))
+qapp.processEvents()
+check(pet.sprite_id == info.id, "宠物切到自定义形象")
+check(not pet.mask().isEmpty(), "自定义形象的遮罩非空")
+pet.apply_config(config_mod.deep_merge(tight, {"pet": {"sprite": "default"}}))
+check(pet.sprite_id == "default", "能切回内置")
+
+# 透明底 PNG:直接采用自带 alpha,跳过抠图
+clear = Path(TMP) / "clear.png"
+rgba = Image.new("RGBA", (120, 120), (0, 0, 0, 0))
+ImageDraw.Draw(rgba).rectangle((30, 30, 90, 90), fill=(20, 120, 220, 255))
+rgba.save(clear)
+with_alpha = sprite_convert.prepare(clear)
+check(with_alpha.used_alpha, "透明底 PNG 走 alpha,不抠背景")
+check(not with_alpha.problems, "自带 alpha 跳过自检")
+
+# 全透明图:得明确报错,不能塞一张空图给用户
+blank = Path(TMP) / "blank.png"
+Image.new("RGBA", (40, 40), (0, 0, 0, 0)).save(blank)
+try:
+    sprite_convert.prepare(blank)
+    check(False, "全透明图应当报错")
+except sprite_convert.ConversionError as exc:
+    check(True, "全透明图报 ConversionError", str(exc))
+
+# 左红右红、中间一整条背景色:抠完剩下的两块都贴着左右边界,自检必须拦下
+band = Path(TMP) / "band.png"
+grad = Image.new("RGB", (96, 96))
+grad.putdata([(x * 255 // 95, 128, 200) for _ in range(96) for x in range(96)])
+grad.save(band)
+risky = sprite_convert.prepare(band)
+check(bool(risky.problems), "贴边的抠图结果被自检拦下", "; ".join(risky.problems))
+
+# 兜底:不抠图,整张图当形象
+whole = sprite_convert.prepare(band, whole=True)
+check(not whole.problems, "整图显示不做自检")
+whole_cut = sprite_convert.cutout_image(band, whole=True)
+check(whole_cut.getchannel("A").getextrema() == (255, 255), "整图显示的 alpha 铺满")
+
+# 重命名只改显示名,目录名(id)不许动
+sprite_library.rename_sprite(info.id, "改过名的猫")
+check(sprite_library.list_sprites()[1].name == "改过名的猫", "重命名生效")
+check(sprite_library.sprite_dir(info.id).is_dir(), "重命名没动目录名")
+try:
+    sprite_library.rename_sprite("default", "换个名")
+    check(False, "内置形象不该能重命名")
+except ValueError:
+    check(True, "内置形象拒绝重命名")
+
+try:
+    sprite_library.delete_sprite("default")
+    check(False, "内置形象不该能删")
+except ValueError:
+    check(True, "内置形象拒绝删除")
+
+check(sprite_library.ensure_available("早就不在了") == "default", "不存在的形象退回内置")
+sprite_library.delete_sprite(info.id)
+check(sprite_library.ensure_available(info.id) == "default", "删掉后自动退回内置")
+check(len(sprite_library.list_sprites()) == 1, "列表回到只剩内置")
 
 print()
 if failures:

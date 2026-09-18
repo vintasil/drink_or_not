@@ -32,6 +32,7 @@ DEFAULTS = {
     "pet": {
         "scale": 0.8,
         "pos": None,  # None = 首次启动时落到屏幕右下角
+        "sprite": "default",  # 形象 id;default = 随包的内置形象,其余在素材库目录下
         "always_on_top": True,
         "click_region": "tight",  # tight = 贴合猫形点击穿透;rect = 整窗接收点击
         "bubble_seconds": 30,

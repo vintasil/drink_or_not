@@ -5,15 +5,11 @@ description = "桌面宠物:一只持剑魔法猫,定时提醒你喝水、上厕
 requires-python = ">=3.9,<3.10"
 dependencies = [
     "PyQt5>=5.15.9,<5.16",
+    "pillow>=9.5",  # 导入自定义形象要在运行时抠图,不再只是打包脚本的依赖
 ]
 
 [project.scripts]
 drink-or-not = "drink_or_not.__main__:main"
-
-[dependency-groups]
-dev = [
-    "pillow>=9.5",
-]
 
 [build-system]
 requires = ["hatchling"]

@@ -11,7 +11,8 @@ from pathlib import Path
 ROOT = Path(SPECPATH).resolve().parent  # SPECPATH = 本文件所在目录(build/)
 
 a = Analysis(
-    [str(ROOT / "src" / "drink_or_not" / "__main__.py")],
+    # 不能直接用 src/drink_or_not/__main__.py:见 build/entry.py 的说明
+    [str(ROOT / "build" / "entry.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
     datas=[(str(ROOT / "assets"), "assets")],
@@ -20,7 +21,7 @@ a = Analysis(
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "PIL", "numpy"],
+    excludes=["tkinter", "numpy"],  # PIL 是运行时依赖(导入形象要抠图),不能再排掉
     noarchive=False,
 )
 
