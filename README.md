@@ -109,11 +109,49 @@ uv run python script/ui_test.py       # 设置窗口 / 自启 / 气泡命中 / �
 
 ## 打包
 
+各自在目标平台上跑,产物是单文件、免 Python 环境的:
+
 ```bash
-bash build/build_linux.sh          # Linux → dist/drink_or_not
+bash build/build_linux.sh          # Linux   → dist/drink_or_not
 build\build_windows.bat            # Windows → dist\drink_or_not.exe
-bash build/build_macos.sh          # macOS → dist/drink_or_not
+bash build/build_macos.sh          # macOS   → dist/drink_or_not
 ```
+
+### 在 Linux 上用 Wine 打 Windows 包
+
+手边没有 Windows 机器时可以借 Wine:
+
+```bash
+bash build/build_windows_on_wine.sh    # → dist/windows/drink_or_not.exe
+```
+
+需要一个装了 Windows 版 Python + PyInstaller + PyQt5 的 Wine prefix(默认
+`~/.wine-pyinstaller`,用 `WINEPREFIX` 覆盖):
+
+```bash
+export WINEPREFIX=~/.wine-pyinstaller
+wineboot -i
+wine python-3.8.10-amd64.exe        # 装 Python 时记得勾 Add Python to PATH
+wine py -m pip install PyQt5==5.15.11 pyinstaller
+```
+
+几条要留意的:
+
+- **产物只在 Wine 里冒烟过,真机能不能跑得你自己验。** Wine 的系统 DLL 和真 Windows
+  有差异,Qt 尤其敏感。有 Windows 机器就别走这条路。
+- 产物落在 `dist/windows/`,不和 Linux 的 `dist/drink_or_not` 混在一起 —— PyInstaller
+  的 `--noconfirm` 是按产物名删旧文件的,共用 `dist/` 有把它顺手删掉的风险。
+- Wine 9 + Windows CPython 有个已知毛病:`stdout` 既不是终端、也不是管道时(重定向进
+  文件、被 CI 抓走),Python 会报 `init_sys_streams ... WinError 6` 当场死掉,跟依赖
+  毫无关系。脚本会识别这种情况并提示,临时办法是加个管道 `| cat`。普通终端不会有这问题。
+- 项目声明的是 Python 3.9,但上面 prefix 里是 3.8 —— 当前代码是 3.8 兼容的,能打。
+  真要严格对齐就装 3.9;两者打出来的产物没差别。
+
+> **关于 `build/entry.py`**:打包入口不是 `src/drink_or_not/__main__.py`,而是这个一层
+> 包装。PyInstaller 是把入口当**顶层脚本**执行的,没有父包,`from .config import ...`
+> 这类相对导入会直接 `ImportError: attempted relative import with no known parent
+> package`。包装脚本用绝对导入把 `main()` 拉起来,包上下文才是完整的。开发时照旧
+> `python -m drink_or_not`。
 
 ## 素材是怎么来的
 

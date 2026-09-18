@@ -4,5 +4,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/.work/
+build/.work-win/   # Wine 交叉打包的中间产物,和 Linux 的分开放
 *.spec.bak
 .pytest_cache/

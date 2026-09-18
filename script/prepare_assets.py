@@ -18,7 +18,7 @@ from statistics import median
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "pic" / "cat" / "magic_cat.png"
+SRC = ROOT / "pic" / "fuck" / "labi.png"
 DST = ROOT / "assets" / "cat.png"
 
 MASK_MAX = 1024  # 抠图工作分辨率,够保拓扑又不至于让纯 Python 洪水填充太慢

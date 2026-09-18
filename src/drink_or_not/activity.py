@@ -130,19 +130,28 @@ def _make_windows() -> Optional[Callable[[], float]]:
         _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
 
     user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    # GetTickCount 是 kernel32 的导出,**不在 user32 上**。写成 user32.GetTickCount 会在
+    # 属性查找那一步就 AttributeError(ctypes 找不到导出),Windows 和 Wine 一个样。
+    user32.GetLastInputInfo.argtypes = [ctypes.c_void_p]
+    user32.GetLastInputInfo.restype = ctypes.c_int
+    kernel32.GetTickCount.argtypes = []
+    kernel32.GetTickCount.restype = ctypes.c_uint
+    get_tick = kernel32.GetTickCount
+
     lpi = LASTINPUTINFO()
     lpi.cbSize = ctypes.sizeof(LASTINPUTINFO)
 
     def query() -> float:
         if not user32.GetLastInputInfo(ctypes.byref(lpi)):
             raise OSError("GetLastInputInfo 失败")
-        # GetLastInputInfo 配 GetTickCount(32 位);GetTickCount64 没有对应的 64 位字段可配
-        elapsed = user32.GetTickCount() - lpi.dwTime
+        # dwTime 是 32 位的 GetTickCount 时刻,所以这里必须用 GetTickCount 而不是
+        # GetTickCount64 —— 位宽不一样,减出来是垃圾
+        elapsed = get_tick() - lpi.dwTime
         if elapsed < 0:  # 计数器约 49.7 天回绕一次
             elapsed += 1 << 32
         return elapsed / 1000.0
 
-    user32.GetTickCount.restype = ctypes.c_uint
     return query
 
 

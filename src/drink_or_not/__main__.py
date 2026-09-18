@@ -31,8 +31,40 @@ def prepare_platform() -> None:
         )
 
 
+CONSOLE_FLAGS = ("-h", "--help", "-v", "--verbose", "--debug-idle")
+
+
+def attach_console(argv) -> None:
+    """Windows 上把 GUI 程序的输出接回控制台。
+
+    console=False 打的 exe 属于 GUI 子系统,系统不给它控制台,sys.stdout/sys.stderr 是
+    None —— print() 和 StreamHandler 都是静默丢弃,`--debug-idle` 会一句不输出地退出。
+    从 cmd 里启动时挂到父进程已有控制台(AttachConsole),双击启动则自己开一个,这样
+    --debug-idle/-v 两条路都能看到东西。没带这些参数启动(正常双击养猫)就什么都不做。
+
+    开发模式(非 frozen)不处理:管道重定向本来就好使,多余开个黑窗口反而碍事。
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    if not any(a in CONSOLE_FLAGS for a in argv):
+        return
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    if not kernel32.AttachConsole(-1):  # -1 = ATTACH_PARENT_PROCESS
+        kernel32.AllocConsole()
+    try:
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+    except OSError:
+        pass  # 接不上就只能算这次没输出,别为此拦住宠物启动
+
+
 def setup_logging(verbose: bool, log_file) -> None:
-    handlers = [logging.StreamHandler(sys.stderr)]
+    handlers = [logging.StreamHandler(sys.stderr)] if sys.stderr is not None else []
     try:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         if log_file.exists() and log_file.stat().st_size > LOG_MAX_BYTES:
@@ -40,6 +72,8 @@ def setup_logging(verbose: bool, log_file) -> None:
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
     except OSError:
         pass
+    if not handlers:
+        handlers = [logging.NullHandler()]
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -76,6 +110,9 @@ def debug_idle() -> int:
 
 
 def main() -> int:
+    # 要在 argparse 解析之前:--debug-idle 和错误提示都得有地方可写
+    attach_console(sys.argv)
+
     parser = argparse.ArgumentParser(prog="drink-or-not", description="桌面宠物:定时提醒你照顾自己")
     parser.add_argument("-v", "--verbose", action="store_true", help="打印调试日志")
     parser.add_argument("--debug-idle", action="store_true", help="打印空闲检测来源并采样后退出")
