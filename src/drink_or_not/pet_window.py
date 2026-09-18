@@ -10,6 +10,7 @@ setMask 用的是 createAlphaMask(),它把 alpha>0 的像素全部算进来(实�
 
 import json
 import logging
+import sys
 from typing import List, Optional
 
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
@@ -24,6 +25,23 @@ log = logging.getLogger(__name__)
 BUBBLE_AREA_H = 150  # 气泡区常驻高度,不随宠物缩放,免得缩小后字看不清
 BUBBLE_MIN_W = 300  # 窗口最小宽度,保证长句子不会被挤成一列
 EDGE_MARGIN = 60  # 首次启动时离屏幕边缘的距离
+
+
+def apply_window_flags(win) -> None:
+    """无边框透明置顶窗口的平台公共设置。
+
+    `script/check_env.py` 的探针窗口也走这一份 —— 自检必须测真窗口的那套 flags,否则测了个
+    别的东西。必须在窗口第一次 show() 之前调用:WA_MacAlwaysShowToolWindow 是在
+    QWidgetPrivate::create() 里被复制到 QWindow 属性上的,晚于创建就没作用了。
+    """
+    win.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+    win.setAttribute(Qt.WA_TranslucentBackground)
+    if sys.platform == "darwin":
+        # Qt.Tool 在 macOS 上是 NSPanel;不设这个属性的话,应用一失活(用户切到别的 App)
+        # 系统就把窗口藏起来,而宠物必须一直看得见。
+        # 不能改用 Qt.Window:那是普通 NSWindow,拿不到 NSWindowStyleMaskNonactivatingPanel,
+        # 反而连"不抢焦点"都做不到。
+        win.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
 
 
 def fill_sprite_menu(menu: QMenu, current_id: str, on_pick) -> None:
@@ -104,8 +122,7 @@ class PetWindow(QWidget):
         self._dragging = False
         self._cat_origin = QPoint()
 
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        apply_window_flags(self)
         self.setWindowTitle("drink_or_not")
 
         self._relayout()

@@ -6,6 +6,7 @@
 产物在 dist/。assets/ 整个目录塞进包里,resources.assets_dir() 会从 _MEIPASS 读它。
 """
 
+import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).resolve().parent  # SPECPATH = 本文件所在目录(build/)
@@ -16,9 +17,12 @@ a = Analysis(
     pathex=[str(ROOT / "src")],
     binaries=[],
     datas=[(str(ROOT / "assets"), "assets")],
-    hiddenimports=[
-        "PyQt5.QtDBus",  # 空闲检测走 DBus,不在 QtCore/QtGui 的默认收集范围内
-    ],
+    hiddenimports=(
+        # 空闲检测走 DBus,不在 QtCore/QtGui 的默认收集范围内
+        ["PyQt5.QtDBus"]
+        if sys.platform.startswith("linux")
+        else []  # macOS/Windows 上没有 session bus,这条 provider 本来就用不到
+    ),
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "numpy"],  # PIL 是运行时依赖(导入形象要抠图),不能再排掉

@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# 在 macOS 上打成 dist/drink_or_not(可再套 .app 外壳)。
+# 在 macOS 上打成 dist/drink_or_not。
 #
 #   bash build/build_macos.sh
 #
-# 注意:macOS 上 Qt.Tool 是 NSPanel,应用失活时会被系统自动隐藏,需要把
-# pet_window.PetWindow 的窗口 flags 从 Qt.Tool 换成 Qt.Window 并调整窗口层级。
-# 详见 README「已知限制」——在改之前,这个平台的拖动定位行为是降级的。
+# 注意:产物是**裸 Mach-O 可执行文件,不是 .app**。没有 Info.plist 就意味着激活策略、
+# Dock 表现、托盘行为都可能和一个正经 .app 不一样 —— 套 .app 外壳(BUNDLE/Info.plist/
+# .icns)目前还没做,判断行为时要把这一点算进去。
+#
+# 窗口失活被系统隐藏这个问题靠 pet_window.apply_window_flags() 里的
+# WA_MacAlwaysShowToolWindow 解决,**不要**把 Qt.Tool 换成 Qt.Window(普通 NSWindow 拿不到
+# NSWindowStyleMaskNonactivatingPanel,只会更糟)。详见 README「已知限制」第 5 条。
+#
+# 打完先跑一遍自检,它会打印一份只能肉眼确认的清单:
+#   uv run python script/check_env.py --hold
 
 set -euo pipefail
 cd "$(dirname "$0")/.."

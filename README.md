@@ -11,6 +11,8 @@
 - Python 3.9(用 uv 管理,**不要**直接用系统的 `python`)
 - [uv](https://docs.astral.sh/uv/)
 - Linux 需要 X11 会话,或装了 XWayland 的 Wayland 会话(原因见「已知限制」)
+- macOS 的移植缺口已补齐,但**还没在真机上跑过**;剩下哪些项要在 Mac 上确认、
+  怎么确认,见 `uv run python script/check_env.py --hold` 末尾打印的肉眼核对清单
 
 ## 安装与运行
 
@@ -135,6 +137,10 @@ build\build_windows.bat            # Windows → dist\drink_or_not.exe
 bash build/build_macos.sh          # macOS → dist/drink_or_not
 ```
 
+**PyInstaller 不能交叉编译。** 它打包的是宿主的解释器和原生库,所以在 Ubuntu 上产不出
+Mach-O —— Mac 的包只能在 Mac 上打。macOS 这一份产出的是裸可执行文件,没有 `.app` 外壳
+(也就没有 Info.plist),激活策略和托盘行为可能因此与正式打包不同。
+
 PyInstaller 的入口是 `build/entry.py`,**不是** `src/drink_or_not/__main__.py`。后者被当成
 顶层脚本执行时,里面的 `from .config import ...` 找不到父包,冻结后一启动就 ImportError;
 更隐蔽的是模块分析也随之失效 —— 整个包连带 Pillow 都不会被打进包体,产物看着挺大却一跑就崩。
@@ -173,8 +179,15 @@ uv run python script/generate_frames.py  # 绕底部 pivot 摇摆 → assets/fra
    alpha>0 的像素全部计入,所以抗锯齿边缘不会被裁掉,不需要额外膨胀。设置里可切到「整窗
    矩形」模式规避个别 compositor 的兼容问题(代价是猫周围一圈也会吃点击)。
 4. **完成判定是启发式的**,理由和调法见上文。
-5. **macOS 上 `Qt.Tool` 是 NSPanel**,应用失活时会被系统自动隐藏,移植时需要换成
-   `Qt.Window` 并调整窗口层级。平台差异都集中在 `pet_window.py`,改一处即可。
+5. **macOS 的窗口置顶靠 `WA_MacAlwaysShowToolWindow`。** `Qt.Tool` 在 macOS 上是 `NSPanel`,
+   不设这个属性的话应用一失活(用户切到别的 App)系统就会把窗口藏起来。设置集中在
+   `pet_window.apply_window_flags()` 里,`script/check_env.py` 的探针窗口也走同一份。
+   **不要改成 `Qt.Window`**:那是普通 `NSWindow`,拿不到 `NSWindowStyleMaskNonactivatingPanel`,
+   反而连"不抢焦点"都做不到。(本条此前写反了。)
+   已知仍未处理:进入别的 App 的全屏空间时猫会看不见 —— 那需要额外调
+   `NSWindowCollectionBehaviorCanJoinAllSpaces`,尚未验证。
+   macOS 上还有一批只能上真机才能确认的项(失活不隐藏、托盘左键语义、Retina 遮罩对齐、
+   自启是否真被 launchd 拾取等),见 `script/check_env.py` 末尾打印的肉眼核对清单。
 6. **XScreenSaver 在 XWayland 下彻底不可用**:XWayland 的 X server 没编
    `MIT-SCREEN-SAVER` 扩展,`XScreenSaverQueryInfo` 调用"成功"但 idle 恒为 0;`QCursor.pos()`
    轮询也不反映桌面级输入。所以空闲检测走 **QtDBus**(PyQt5 自带,零额外依赖)调

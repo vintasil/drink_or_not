@@ -14,8 +14,14 @@ import sys
 import tempfile
 
 TMP = tempfile.mkdtemp(prefix="drink_e2e_")
-os.environ["XDG_CONFIG_HOME"] = TMP
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+if sys.platform == "darwin":
+    # macOS 忽略 XDG_CONFIG_HOME,config_dir() 看的是 ~/Library/Application Support
+    os.environ["HOME"] = TMP
+else:
+    os.environ["XDG_CONFIG_HOME"] = TMP
+if sys.platform.startswith("linux"):
+    # 只有 X11/XWayland 需要钉死 xcb;macOS 上必须让 Qt 自己选 cocoa
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 logging.basicConfig(
     level=logging.INFO,

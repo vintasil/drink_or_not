@@ -9,22 +9,29 @@ e2e_test.py 只跑到"调度→判定→记录",这里补上剩下没被跑到�
 
 import json
 import os
+import plistlib
 import sys
 import tempfile
 from pathlib import Path
 
 TMP = tempfile.mkdtemp(prefix="drink_ui_")
-os.environ["XDG_CONFIG_HOME"] = TMP
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+if sys.platform == "darwin":
+    # macOS 忽略 XDG_CONFIG_HOME,config_dir() 看的是 ~/Library/Application Support
+    os.environ["HOME"] = TMP
+else:
+    os.environ["XDG_CONFIG_HOME"] = TMP
+if sys.platform.startswith("linux"):
+    # 只有 X11/XWayland 需要钉死 xcb;macOS 上必须让 Qt 自己选 cocoa
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 from PIL import Image, ImageDraw  # noqa: E402
-from PyQt5.QtCore import QPoint, QRect, QTime  # noqa: E402
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PyQt5.QtCore import QPoint, QRect, Qt, QTime  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 
-from drink_or_not import autostart, config as config_mod  # noqa: E402
+from drink_or_not import activity, autostart, config as config_mod  # noqa: E402
 from drink_or_not import resources, sprite_convert, sprite_library  # noqa: E402
 from drink_or_not.bubble import Bubble  # noqa: E402
-from drink_or_not.pet_window import PetWindow, SpriteSet  # noqa: E402
+from drink_or_not.pet_window import PetWindow, SpriteSet, apply_window_flags  # noqa: E402
 from drink_or_not.settings_dialog import SettingsDialog  # noqa: E402
 
 failures = []
@@ -91,13 +98,43 @@ print("\n[开机自启]")
 check(autostart.is_enabled() is False, "初始未开启")
 check(autostart.set_enabled(True) is True, "开启成功")
 check(autostart.is_enabled() is True, "开启后状态为真")
-desktop = autostart._linux_path()
-check(desktop.exists(), "写到了 autostart 目录", str(desktop))
-body = desktop.read_text(encoding="utf-8")
-check("[Desktop Entry]" in body and "Type=Application" in body, "内容含 Desktop Entry")
-check(f"Exec={autostart.install_command()}" in body, "Exec 指向本解释器", autostart.install_command())
+
+if sys.platform == "darwin":
+    # macOS 写的是 LaunchAgent plist。临时 HOME 让 _macos_path() 落在临时目录里
+    target = autostart._macos_path()
+    check(target.exists(), "写到了 LaunchAgents 目录", str(target))
+    body = plistlib.loads(target.read_bytes())
+    check(body["Label"] == autostart.MACOS_LABEL, "Label 对", str(body["Label"]))
+    check(body["RunAtLoad"] is True, "RunAtLoad 打开")
+    check(
+        body["ProgramArguments"][0] == sys.executable,
+        "ProgramArguments 指向本解释器",
+        str(body["ProgramArguments"]),
+    )
+    check(
+        body["ProgramArguments"][len(body["ProgramArguments"]) - 2 :] == ["-m", "drink_or_not"],
+        "未冻结时走模块入口",
+        str(body["ProgramArguments"]),
+    )
+else:
+    target = autostart._linux_path()
+    check(target.exists(), "写到了 autostart 目录", str(target))
+    body = target.read_text(encoding="utf-8")
+    check("[Desktop Entry]" in body and "Type=Application" in body, "内容含 Desktop Entry")
+    check(f"Exec={autostart.install_command()}" in body, "Exec 指向本解释器", autostart.install_command())
+
 check(autostart.set_enabled(False) is True, "关闭成功")
-check(not desktop.exists(), "关闭后文件被删掉")
+check(not target.exists(), "关闭后文件被删掉")
+
+# plist 的内容是纯函数,任何平台都能断言 —— 打包后路径要换成可执行文件本身
+payload = autostart.macos_plist_payload(frozen=True, executable="/Applications/drink_or_not")
+check(payload["ProgramArguments"] == ["/Applications/drink_or_not"], "冻结后不带 -m", str(payload))
+check(payload["RunAtLoad"] is True, "RunAtLoad 始终打开")
+check(payload["Label"] == autostart.MACOS_LABEL, "Label 用的是固定标识")
+check(
+    plistlib.loads(plistlib.dumps(payload)) == payload,
+    "plist 能序列化并原样读回",
+)
 
 # ---------- 气泡命中 ----------
 print("\n[气泡按钮命中]")
@@ -286,6 +323,65 @@ check(sprite_library.ensure_available("早就不在了") == "default", "不存�
 sprite_library.delete_sprite(info.id)
 check(sprite_library.ensure_available(info.id) == "default", "删掉后自动退回内置")
 check(len(sprite_library.list_sprites()) == 1, "列表回到只剩内置")
+
+# ---------- macOS 移植:能在 Linux 上证的部分 ----------
+# 真机行为(window 失活是否隐藏、全屏浮层、托盘点击语义、Retina 遮罩)只能在 Mac 上看。
+# 这里只钉住纯逻辑,免得改了 darwin 分支却没人发现。
+print("\n[macOS 移植]")
+
+
+def provider_names(platform):
+    """假 sys.platform 下取 provider 名字。只看名字,不调用 factory —— 不碰任何 mac 框架。"""
+    real = sys.platform
+    sys.platform = platform
+    try:
+        return [name for name, _ in activity._providers()]
+    finally:
+        sys.platform = real
+
+
+darwin = provider_names("darwin")
+check(darwin[0] == "macos/CGEventSourceSecondsSinceLastEventType", "darwin 首选 CoreGraphics", str(darwin))
+check(len(darwin) == 2, "darwin 有兜底,不是单点", str(darwin))
+check(darwin[-1] == "fallback/QCursor-poll", "darwin 兜底是 QCursor 轮询", str(darwin))
+check("linux/mutter-idle-monitor" not in darwin, "darwin 不串到 Linux 的来源", str(darwin))
+linux = provider_names("linux")
+check(linux[0] == "linux/mutter-idle-monitor" and linux[-1] == "fallback/QCursor-poll", "Linux 链未受影响", str(linux))
+check("macos/CGEventSourceSecondsSinceLastEventType" not in linux, "Linux 不串到 mac 的来源", str(linux))
+
+# 探针窗口和真窗口必须共用同一份 flags,否则自检测的不是真东西
+probe = QWidget()
+apply_window_flags(probe)
+check(bool(probe.windowFlags() & Qt.FramelessWindowHint), "apply_window_flags 设上了无边框")
+check(bool(probe.windowFlags() & Qt.WindowStaysOnTopHint), "apply_window_flags 设上了置顶")
+check(bool(probe.windowFlags() & Qt.Tool), "apply_window_flags 用了 Qt.Tool(不是 Qt.Window)")
+check(probe.testAttribute(Qt.WA_TranslucentBackground), "apply_window_flags 设上了透明属性")
+# 真窗口也走了同一份 apply_window_flags。只比它独占、且不会被配置改动的两位 ——
+# WindowStaysOnTopHint 是"置顶"开关,apply_config 会按 always_on_top 把它打开/关掉,
+# 比它会误报(上面的设置窗口测试恰好把它关了)。
+shared = Qt.FramelessWindowHint | Qt.Tool
+check(
+    (pet.windowFlags() & shared) == shared,
+    "真窗口走的是同一份 flags(不是各写各的)",
+    str(int(pet.windowFlags() & shared)),
+)
+
+# darwin 那条分支在 Linux 上永远走不到,里面写错名字的话只有上 Mac 才会 AttributeError。
+# 这里把 sys.platform 骗成 darwin 真跑一遍 —— 在 Linux 上设这个属性只是置个无效的位,不会炸。
+check(hasattr(Qt, "WA_MacAlwaysShowToolWindow"), "PyQt5 里有 WA_MacAlwaysShowToolWindow")
+real_platform = sys.platform
+sys.platform = "darwin"
+try:
+    macprobe = QWidget()
+    apply_window_flags(macprobe)
+    mac_ok = macprobe.testAttribute(Qt.WA_MacAlwaysShowToolWindow)
+    mac_err = ""
+except Exception as exc:  # noqa: BLE001 — 就是要看它会不会炸
+    mac_ok, mac_err = False, repr(exc)
+finally:
+    sys.platform = real_platform
+check(mac_ok, "darwin 分支能真的跑通并设上属性", mac_err)
+# WA_MacAlwaysShowToolWindow 在 Linux 上是 no-op(平台门控),它的真实验证在 check_env 的 darwin 分支
 
 print()
 if failures:
