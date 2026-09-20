@@ -4,5 +4,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/.work/
+build/.wheelhouse/
 *.spec.bak
 .pytest_cache/

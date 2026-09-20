@@ -120,11 +120,23 @@ fresh ≥ 阈值  →  记为完成
 ## 自检脚本
 
 ```bash
-uv run python script/check_env.py     # 环境自检:平台插件、素材、空闲检测、托盘等 7 项
+uv run python script/check_env.py     # 环境自检:平台插件、透明、遮罩、空闲检测等
 uv run drink-or-not --debug-idle      # 打印命中的空闲检测来源,连采 6 秒
 uv run python script/e2e_test.py      # 调度→判定→记录→托盘统计 的端到端冒烟
 uv run python script/ui_test.py       # 设置窗口 / 自启 / 气泡命中 / 窗口遮罩 / 素材库 的冒烟
 ```
+
+自检的逻辑本体在 `src/drink_or_not/selfcheck.py`,**打包产物里跑的是同一份**,所以到了
+没有仓库、没有 uv 的目标机上照样能逐项验:
+
+```bash
+drink-or-not --self-check          # 打包产物:同样的检查
+drink-or-not --self-check --hold   # 自检完不自动退出,方便看那只猫
+```
+
+自检结果有四种状态:`PASS` / `FAIL` / `WARN` / `SKIP`。**`SKIP` 不等于通过** —— 它是
+"本平台测不了",会被单独列出来,不会混进通过数里凑数。末尾还会打印一份只能肉眼确认的
+清单(窗口失活、全屏浮层、托盘左键语义、Retina 遮罩对齐……)。
 
 `--debug-idle` 是排查"为什么判定一直不通过"的第一站。采样时别碰鼠标,数值应该稳步上涨;
 出现 `↓ 有输入!` 就说明有东西在持续产生输入事件。
@@ -136,6 +148,59 @@ bash build/build_linux.sh          # Linux → dist/drink_or_not
 build\build_windows.bat            # Windows → dist\drink_or_not.exe
 bash build/build_macos.sh          # macOS → dist/drink_or_not
 ```
+
+### 在 Ubuntu 上产出 macOS 产物:uvbox 路线
+
+上面那份 `build_macos.sh` 必须在 Mac 上跑。如果手边只有 Ubuntu、想先把产物递给 Mac 试,
+走 uvbox:
+
+```bash
+bash build/build_macos_uvbox.sh            # → dist/drink-or-not-*-apple-darwin.tar.gz
+bash build/build_macos_uvbox.sh --linux    # 顺带打个 Linux 变体,好在 Ubuntu 上先跑一遍
+```
+
+两者**不是一回事**,别混:
+
+| | PyInstaller(`build_macos.sh`) | uvbox(`build_macos_uvbox.sh`) |
+|---|---|---|
+| 在哪打 | 只能在 Mac 上 | Ubuntu 上就能打,交叉产出 Mach-O |
+| 自包含 | 是,解释器和 Qt 库都塞进去 | **不是**。是个 Go 启动器,内嵌一份 uv 和本项目的 wheel |
+| 首次运行 | 直接跑 | **必须联网**,要下载 uv、CPython、PyQt5/Pillow,等一两分钟 |
+| 产物 | 裸 Mach-O | 裸 Mach-O(同样没有 `.app`) |
+
+内嵌的 wheel 里**带着 assets** —— 靠 `pyproject.toml` 里把仓库根的 `assets/` force-include
+成 `drink_or_not/assets`,`resources.assets_dir()` 再从包内找它。少了这一步,产物启动就会弹
+"缺少 assets"。(这条在 `ui_test.py` 的 `[打包:assets 随包]` 段有断言钉着。)
+
+递到 Mac 上这么跑:
+
+```bash
+tar xzf dist/drink-or-not-aarch64-apple-darwin.tar.gz -C /tmp/xy
+/tmp/xy/drink-or-not --self-check --hold
+```
+
+**两个坑,踩过一次了:**
+
+1. uvbox 按 `<name>-<hash>` 缓存装好的环境,而 **hash 只跟 `build/uvbox.toml` 和平台有关,
+   跟 wheel 内容无关**。改了代码重新打包但没动配置,目标机会复用旧盒子、跑的还是老代码。
+   验新产物前先删掉 `~/.local/share/uvbox/drink-or-not-*`。
+2. 机器时钟不对会让 uv 的缓存和 HTTP 校验出怪问题。产物行为反常时先对一下时间。
+
+**自启在这条路线下能用,但要知道它指向哪。** 打开「开机自启」写进系统的是
+`<盒子里的 python> -m drink_or_not`(就是 `sys.executable`),落在
+`~/.local/share/uvbox/drink-or-not-<hash>/tools/...` 下。实测把 uvbox 的环境变量全剥掉、
+直接跑这条命令是能起来的,所以自启确实生效。两点残余风险:
+
+- 删掉那个盒子目录(或换机器、换 `build/uvbox.toml` 导致 hash 变化)自启会**静默失效**,
+  重开一次自启开关即可。
+- uvbox **首次运行要联网下载**,在那之前自启无从谈起 —— 先手工把产物跑通一次。
+
+> 为什么不能让自启指向启动器本身?因为**启动器的真实路径从进程内部拿不到**:uvbox 下
+> `sys.argv[0]` 是盒子内部的 uv shim(`.../tools-bin/drink-or-not`),不是用户手里那个文件,
+> 也没有任何环境变量暴露它。所以只能指向盒子里的 python —— 好在实测它是能用的。
+
+**uvbox 路线在 Ubuntu 上能证明的只有"装得起来、assets 找得到、逻辑没变"** —— 证明不了任何
+macOS 特有的行为。那些仍然只能上真机,照 `--self-check` 末尾的清单过一遍。
 
 **PyInstaller 不能交叉编译。** 它打包的是宿主的解释器和原生库,所以在 Ubuntu 上产不出
 Mach-O —— Mac 的包只能在 Mac 上打。macOS 这一份产出的是裸可执行文件,没有 `.app` 外壳
@@ -202,12 +267,13 @@ uv run python script/generate_frames.py  # 绕底部 pivot 摇摆 → assets/fra
 ## 项目结构
 
 ```
-script/          素材生成与自检脚本(不随包分发)
+script/          素材生成脚本 + 自检/测试的薄壳(不随包分发)
 src/drink_or_not/
-  __main__.py      入口:平台预检、单实例锁、日志
+  __main__.py      入口:平台预检、单实例锁、日志、--self-check / --debug-idle
   app.py           组装各组件(只连线,不写业务规则)
   config.py        配置读写 + 默认值
-  resources.py     资源路径解析(兼容 PyInstaller)
+  resources.py     资源路径解析(兼容 PyInstaller 与 wheel 安装)
+  selfcheck.py     环境自检本体,script/check_env.py 与 --self-check 共用同一份
   pet_window.py    无边框透明置顶窗口:轮播 / 拖动 / 遮罩 / 右键菜单
   sprite_convert.py  一张图 → 抠背景 + 摇摆帧(运行时导入与 script/ 共用同一份)
   sprite_library.py  本地形象素材库的读写(纯文件操作,不碰 Qt)
@@ -221,7 +287,7 @@ src/drink_or_not/
   settings_dialog.py  设置窗口
   tray.py          系统托盘
   autostart.py     开机自启(三平台)
-build/           打包脚本 + PyInstaller spec + 冻结入口(entry.py)
+build/           打包脚本 + PyInstaller spec + 冻结入口(entry.py)+ uvbox 配置
 assets/          抠好的素材,由 script/ 生成
 pic/cat/         原图,只读
 ```

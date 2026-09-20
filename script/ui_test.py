@@ -380,8 +380,73 @@ except Exception as exc:  # noqa: BLE001 — 就是要看它会不会炸
     mac_ok, mac_err = False, repr(exc)
 finally:
     sys.platform = real_platform
-check(mac_ok, "darwin 分支能真的跑通并设上属性", mac_err)
+check(mac_ok, "darwin 分支真的能跑通并设上属性", mac_err)
 # WA_MacAlwaysShowToolWindow 在 Linux 上是 no-op(平台门控),它的真实验证在 check_env 的 darwin 分支
+
+# ---------- 打包路线:assets 必须能跟着 wheel 走 ----------
+# uvbox / uv tool install 装出来的目录里没有仓库根的 assets/,全靠 pyproject.toml 的
+# force-include 把它映射进包内。这里把三种布局都摆出来,钉住 assets_dir() 的解析顺序。
+print("\n[打包:assets 随包]")
+
+# 从测试脚本自身推仓库根,不去问 resources —— 拿被测对象当基准就成了自证。
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def assets_dir_as(package_file, meipass=None):
+    """把 resources.__file__(必要时还有 sys._MEIPASS)指到别处,看 assets_dir() 解析到哪。"""
+    real_file = resources.__file__
+    had_meipass = hasattr(sys, "_MEIPASS")
+    real_meipass = getattr(sys, "_MEIPASS", None)
+    resources.__file__ = str(package_file)
+    if meipass is not None:
+        sys._MEIPASS = str(meipass)
+    elif had_meipass:
+        del sys._MEIPASS
+    try:
+        return resources.assets_dir()
+    finally:
+        resources.__file__ = real_file
+        if had_meipass:
+            sys._MEIPASS = real_meipass
+        elif meipass is not None:
+            del sys._MEIPASS
+
+
+# 1) 仓库检出的现状:包目录里没有 assets/,应当落到仓库根。
+#    这条同时防住"packaged 分支误判" —— 判错了会把源码运行也带偏。
+check(resources.assets_dir() == ROOT / "assets", "源码运行时解析到仓库根 assets")
+check((resources.assets_dir() / "manifest.json").is_file(), "仓库根那份确实有 manifest.json")
+
+# 2) wheel 装出来的布局:assets 在包内,靠 __file__ 找到,不依赖 cwd。
+with tempfile.TemporaryDirectory(prefix="drink_pkg_") as pkg:
+    pkg = Path(pkg)
+    (pkg / "assets" / "frames").mkdir(parents=True)
+    (pkg / "assets" / "manifest.json").write_text("{}", encoding="utf-8")
+    (pkg / "resources.py").write_text("", encoding="utf-8")
+    check(assets_dir_as(pkg / "resources.py") == pkg / "assets", "装出来的包能靠 __file__ 找到 assets")
+
+# 3) 冻结(PyInstaller):_MEIPASS 优先于包内那份。
+with tempfile.TemporaryDirectory(prefix="drink_frozen_") as frozen, tempfile.TemporaryDirectory(
+    prefix="drink_pkg_"
+) as pkg:
+    frozen, pkg = Path(frozen), Path(pkg)
+    (frozen / "assets").mkdir(parents=True)
+    (frozen / "assets" / "manifest.json").write_text("{}", encoding="utf-8")
+    (pkg / "assets").mkdir(parents=True)
+    (pkg / "assets" / "manifest.json").write_text("{}", encoding="utf-8")
+    (pkg / "resources.py").write_text("", encoding="utf-8")
+    check(
+        assets_dir_as(pkg / "resources.py", meipass=frozen) == frozen / "assets",
+        "冻结时 _MEIPASS 优先",
+    )
+
+# force-include 是上面第 2 条成立的唯一前提,被删掉的话只有真去 uvbox 打包才会发现。
+# 这里不做真实构建(太慢),只确认声明还在 —— 标签如实写成"声明"。
+pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+check(
+    '[tool.hatch.build.targets.wheel.force-include]' in pyproject and '"assets" = "drink_or_not/assets"' in pyproject,
+    "pyproject 里声明了 assets 的 force-include",
+)
 
 print()
 if failures:
