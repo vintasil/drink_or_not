@@ -146,8 +146,51 @@ drink-or-not --self-check --hold   # 自检完不自动退出,方便看那只猫
 ```bash
 bash build/build_linux.sh          # Linux → dist/drink_or_not
 build\build_windows.bat            # Windows → dist\drink_or_not.exe
-bash build/build_macos.sh          # macOS → dist/drink_or_not
+bash build/build_macos.sh          # macOS → dist/drink_or_not.app
 ```
+
+**PyInstaller 不能交叉编译。** 它打包的是宿主的解释器和原生库,所以在 Ubuntu 上产不出
+Mach-O —— Mac 的包只能在 Mac 上打。这也是为什么产出的东西能自包含,以及为什么 uvbox
+(见下)是个绕路方案。
+
+PyInstaller 的入口是 `build/entry.py`,**不是** `src/drink_or_not/__main__.py`。后者被当成
+顶层脚本执行时,里面的 `from .config import ...` 找不到父包,冻结后一启动就 ImportError;
+更隐蔽的是模块分析也随之失效 —— 整个包连带 Pillow 都不会被打进包体,产物看着挺大却一跑就崩。
+`entry.py` 用绝对导入做薄壳绕开这点。
+
+### 分发给别人(macOS)
+
+`build_macos.sh` 产出 `dist/drink_or_not.app` —— **自包含**的外壳:解释器、Qt 库、assets 全
+在里面。对方双击就能开,**不需要联网、不需要装 uv、不需要开终端**。这是它和 uvbox 那个路线的
+根本区别。
+
+```bash
+cd dist && zip -qry drink_or_not-macos-$(uname -m).zip drink_or_not.app
+```
+
+- **必须整个 `.app` 目录一起压**(`zip -r` / `tar`,别在 Finder 里只拖里面那个二进制),
+  否则可执行权限和内部符号链接会丢。
+- 名字里带上 `$(uname -m)`:包是 `arm64` 还是 `x86_64` 取决于你打包那台机器,**两者互不通用**
+  (Intel 的 Mac 跑不了 arm64 的包)。
+
+对方那边:
+
+```bash
+unzip drink_or_not-macos-arm64.zip
+xattr -dr com.apple.quarantine drink_or_not.app
+open drink_or_not.app
+```
+
+`xattr` 那行是拆 Gatekeeper 的隔离标记。没签名也没公证的产物,对方从浏览器/微信/AirDrop
+收到后系统会拦一次("无法验证开发者"),`xattr` 或右键→「打开」都能放行;**想彻底消掉这个提示
+只能买 Apple Developer 账号做签名 + 公证,没有免费替代**。
+
+Info.plist 里两个值得知道的点:
+
+- `NSHighResolutionCapable` —— Retina 的关键。不写这条,整个应用会跑在低分辨率放大模式里,
+  猫是糊的;而且自检判不出来(只有肉眼能看出来)。
+- **刻意没加 `LSUIElement`**(「不进 Dock」那个开关)。它会改掉激活策略,设置窗口还能不能正常
+  拿到焦点只能在真机上验。先按普通 App 出,虚拟机结果出来再决定要不要翻。
 
 ### 在 Ubuntu 上产出 macOS 产物:uvbox 路线
 
@@ -166,7 +209,7 @@ bash build/build_macos_uvbox.sh --linux    # 顺带打个 Linux 变体,好在 Ub
 | 在哪打 | 只能在 Mac 上 | Ubuntu 上就能打,交叉产出 Mach-O |
 | 自包含 | 是,解释器和 Qt 库都塞进去 | **不是**。是个 Go 启动器,内嵌一份 uv 和本项目的 wheel |
 | 首次运行 | 直接跑 | **必须联网**,要下载 uv、CPython、PyQt5/Pillow,等一两分钟 |
-| 产物 | 裸 Mach-O | 裸 Mach-O(同样没有 `.app`) |
+| 产物 | 自包含 `.app`,双击即用 | 裸 Mach-O,没有 `.app` |
 
 内嵌的 wheel 里**带着 assets** —— 靠 `pyproject.toml` 里把仓库根的 `assets/` force-include
 成 `drink_or_not/assets`,`resources.assets_dir()` 再从包内找它。少了这一步,产物启动就会弹
@@ -202,14 +245,8 @@ tar xzf dist/drink-or-not-aarch64-apple-darwin.tar.gz -C /tmp/xy
 **uvbox 路线在 Ubuntu 上能证明的只有"装得起来、assets 找得到、逻辑没变"** —— 证明不了任何
 macOS 特有的行为。那些仍然只能上真机,照 `--self-check` 末尾的清单过一遍。
 
-**PyInstaller 不能交叉编译。** 它打包的是宿主的解释器和原生库,所以在 Ubuntu 上产不出
-Mach-O —— Mac 的包只能在 Mac 上打。macOS 这一份产出的是裸可执行文件,没有 `.app` 外壳
-(也就没有 Info.plist),激活策略和托盘行为可能因此与正式打包不同。
-
-PyInstaller 的入口是 `build/entry.py`,**不是** `src/drink_or_not/__main__.py`。后者被当成
-顶层脚本执行时,里面的 `from .config import ...` 找不到父包,冻结后一启动就 ImportError;
-更隐蔽的是模块分析也随之失效 —— 整个包连带 Pillow 都不会被打进包体,产物看着挺大却一跑就崩。
-`entry.py` 用绝对导入做薄壳绕开这点。
+**要发给别人用,就别走 uvbox。** 它是薄启动器,对方首次运行必须联网下载一百多 MB,还等
+一两分钟 —— 这不是能交给非技术用户的东西。走 `build_macos.sh` 产 `.app`。
 
 ## 素材是怎么来的
 

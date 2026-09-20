@@ -258,9 +258,11 @@ EYEBALL_CHECKLIST = (
     "2. 用 Safari 之类进全屏 -> 猫还在吗?预期会消失(需要 NSWindowCollectionBehaviorCanJoinAllSpaces,本次未做)",
     "3. 左键点托盘图标 -> 菜单是不是也跟着弹出来了?(qcocoa 左键同时发 Trigger 且弹菜单)",
     "4. 把猫拖到屏幕最顶端 -> 还能拖动吗?菜单栏会不会吃掉点击?",
-    "5. Dock 里有没有多出一个图标?(Qt.Tool 的 NSPanel 预期不进 Dock)",
-    "6. 猫的边缘清晰吗?拖动时命中区跟手吗?(Retina 遮罩对齐)",
+    "5. Dock 里有没有多出一个图标?(.app 外壳本来就会有一个;uvbox 那种裸二进制预期没有。"
+    "想彻底不出现要加 LSUIElement,见 spec 里的说明)",
+    "6. 猫的边缘清晰吗?拖动时命中区跟手吗?(Retina 遮罩对齐;糊的话先查 NSHighResolutionCapable)",
     "7. 把猫拖到另一块屏上 -> 位置对吗?重开应用后位置还在吗?",
+    "8. 双击 .app 能直接开吗?被 Gatekeeper 拦的话,右键->「打开」放行一次看看还拦不拦",
 )
 
 

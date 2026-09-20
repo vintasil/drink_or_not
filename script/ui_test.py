@@ -12,7 +12,11 @@ import os
 import plistlib
 import sys
 import tempfile
+import types
 from pathlib import Path
+
+# 从测试脚本自身推仓库根,不去问被测代码 —— 拿被测对象当基准就成了自证。
+ROOT = Path(__file__).resolve().parents[1]
 
 TMP = tempfile.mkdtemp(prefix="drink_ui_")
 if sys.platform == "darwin":
@@ -383,13 +387,83 @@ finally:
 check(mac_ok, "darwin 分支真的能跑通并设上属性", mac_err)
 # WA_MacAlwaysShowToolWindow 在 Linux 上是 no-op(平台门控),它的真实验证在 check_env 的 darwin 分支
 
+# spec 里那个 darwin 分支(BUNDLE/.app)在 Linux 上永远走不到,参数写错了只有真去 Mac 打包
+# 才会炸。用桩把三个平台各跑一遍 —— 比 grep 字符串结实,能真的发现 BUNDLE 参数写错。
+print("\n[打包 spec 的平台分派]")
+
+
+def spec_calls(platform):
+    """假 sys.platform 下执行真 spec,返回各类构建对象的调用参数。
+
+    必须把假 sys 塞进 sys.modules:spec 顶部自己 `import sys`,只改 globals 会被它覆盖。
+    """
+    captured = {}
+
+    class Stub:
+        def __init__(self, *a, **k):
+            self.k = k
+            captured.setdefault(type(self).__name__, []).append(k)
+
+    class Analysis(Stub):
+        pure, scripts, binaries, datas = [], [], [], []
+
+    class PYZ(Stub):
+        pass
+
+    class EXE(Stub):
+        pass
+
+    class BUNDLE(Stub):
+        pass
+
+    fake = types.ModuleType("sys")
+    fake.platform = platform
+    fake.frozen = False
+    real_module = sys.modules["sys"]
+    sys.modules["sys"] = fake
+    try:
+        globs = {
+            "SPECPATH": str(ROOT / "build"),
+            "Analysis": Analysis,
+            "PYZ": PYZ,
+            "EXE": EXE,
+            "BUNDLE": BUNDLE,
+        }
+        exec(compile((ROOT / "build" / "drink_or_not.spec").read_text(encoding="utf-8"), "spec", "exec"), globs)
+    finally:
+        sys.modules["sys"] = real_module
+    return captured
+
+
+linux_spec = spec_calls("linux")
+check(linux_spec["Analysis"][0]["hiddenimports"] == ["PyQt5.QtDBus"], "Linux 收 QtDBus(空闲检测要用)")
+check("BUNDLE" not in linux_spec, "Linux 不产 .app 外壳")
+
+win_spec = spec_calls("win32")
+check(win_spec["Analysis"][0]["hiddenimports"] == [], "Windows 不收 QtDBus(没有 session bus)")
+check("BUNDLE" not in win_spec, "Windows 不产 .app 外壳")
+
+mac_spec = spec_calls("darwin")
+check("BUNDLE" in mac_spec, "darwin 走 BUNDLE 产 .app")
+if "BUNDLE" in mac_spec:
+    bundle = mac_spec["BUNDLE"][0]
+    check(bundle["name"] == "drink_or_not.app", "外壳名是 drink_or_not.app", str(bundle.get("name")))
+    check(
+        bundle["bundle_identifier"] == autostart.MACOS_LABEL,
+        "bundle id 和 LaunchAgent Label 同一域名",
+        f'{bundle.get("bundle_identifier")} vs {autostart.MACOS_LABEL}',
+    )
+    # Retina:少了这条整个应用跑在低分辨率放大模式,猫是糊的,而且只有肉眼看得出来
+    check(
+        bundle["info_plist"].get("NSHighResolutionCapable") is True,
+        "info_plist 声明了 NSHighResolutionCapable(Retina)",
+    )
+check(mac_spec["Analysis"][0]["hiddenimports"] == [], "macOS 不收 QtDBus(没有 session bus)")
+
 # ---------- 打包路线:assets 必须能跟着 wheel 走 ----------
 # uvbox / uv tool install 装出来的目录里没有仓库根的 assets/,全靠 pyproject.toml 的
 # force-include 把它映射进包内。这里把三种布局都摆出来,钉住 assets_dir() 的解析顺序。
 print("\n[打包:assets 随包]")
-
-# 从测试脚本自身推仓库根,不去问 resources —— 拿被测对象当基准就成了自证。
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def assets_dir_as(package_file, meipass=None):
