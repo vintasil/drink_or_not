@@ -4,5 +4,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/.work/
+build/.wheelhouse/
+# 图标是 pic/cat/magic_cat.png 的派生物,由 script/make_icon.py 现做
+build/icon.icns
+build/icon.png
 *.spec.bak
 .pytest_cache/

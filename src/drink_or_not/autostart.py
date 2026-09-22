@@ -97,17 +97,25 @@ def _set_windows(enabled: bool) -> bool:
     return True
 
 
+def macos_plist_payload(*, frozen: bool, executable: str) -> dict:
+    """LaunchAgent 的 plist 内容。
+
+    抽成纯函数是为了能在任何平台上断言它 —— 这是移植里少数几个"真平台相关、却不需要 Mac
+    就能验"的东西,别让它埋在 _set_macos 的 IO 里。
+    """
+    args = [executable] + ([] if frozen else ["-m", "drink_or_not"])
+    return {"Label": MACOS_LABEL, "ProgramArguments": args, "RunAtLoad": True}
+
+
 def _set_macos(enabled: bool) -> bool:
     path = _macos_path()
     if not enabled:
         path.unlink(missing_ok=True)
         return True
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "Label": MACOS_LABEL,
-        "ProgramArguments": [sys.executable] + ([] if getattr(sys, "frozen", False) else ["-m", "drink_or_not"]),
-        "RunAtLoad": True,
-    }
+    # 只写 plist,不调 launchctl bootstrap:部分 macOS 版本下未注册的 LaunchAgent 登录时不会
+    # 被 launchd 拾取。这是已知的移植缺口,真机验证后再决定要不要补。
+    payload = macos_plist_payload(frozen=bool(getattr(sys, "frozen", False)), executable=sys.executable)
     with path.open("wb") as fh:
         plistlib.dump(payload, fh)
     return True

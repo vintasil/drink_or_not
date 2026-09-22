@@ -1,0 +1,6 @@
+# uvbox 的打包配置。name 决定产物的文件名和 uv 装出来的工具名,script 是要暴露的命令。
+# 注意 uvbox 的"盒子"缓存目录名是 <name>-<hash>,hash 只跟这份配置和平台有关 ——
+# 换了 wheel 但配置没动,hash 不变,旧盒子会被复用(见 build_macos_uvbox.sh 的提醒)。
+[package]
+name = "drink-or-not"
+script = "drink-or-not"

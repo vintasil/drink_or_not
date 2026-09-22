@@ -184,6 +184,9 @@ def _providers():
         return
     if sys.platform == "darwin":
         yield "macos/CGEventSourceSecondsSinceLastEventType", _make_macos
+        # 兜底比 CoreGraphics 弱:QCursor 轮询看不见纯键盘输入(比如只看视频不动鼠标)。
+        # 但"弱"远好过"没有" —— 没有来源意味着完成判定永远为假,而且是静默的。
+        yield "fallback/QCursor-poll", _make_cursor_fallback
         return
     yield "linux/mutter-idle-monitor", _make_mutter
     yield "linux/org.freedesktop.ScreenSaver", _make_screensaver

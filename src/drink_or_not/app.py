@@ -1,11 +1,12 @@
 """把各组件接起来。这里不写业务规则,只做连线和生命周期管理。"""
 
+import copy
 import logging
 
 from PyQt5.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from . import config as config_mod
-from . import messages, tracker
+from . import messages, sprite_dialog, sprite_library, tracker
 from .activity import IdleDetector
 from .judge import CompletionJudge
 from .pet_window import PetWindow
@@ -62,6 +63,9 @@ class Application:
         self.pet.help_requested.connect(self._show_help)
         self.pet.quit_requested.connect(self.quit)
         self.pet.test_requested.connect(self._test_reminder)
+        self.pet.sprite_switch_requested.connect(self._switch_sprite)
+        self.pet.sprite_import_requested.connect(self._import_sprite)
+        self.pet.sprite_manage_requested.connect(self._manage_sprites)
 
         if self.tray:
             self.tray.settings_requested.connect(self._open_settings)
@@ -69,6 +73,9 @@ class Application:
             self.tray.quit_requested.connect(self.quit)
             self.tray.test_requested.connect(self._test_reminder)
             self.tray.visibility_toggled.connect(self._toggle_visibility)
+            self.tray.sprite_switch_requested.connect(self._switch_sprite)
+            self.tray.sprite_import_requested.connect(self._import_sprite)
+            self.tray.sprite_manage_requested.connect(self._manage_sprites)
 
     def start(self) -> None:
         self.pet.show()
@@ -122,6 +129,35 @@ class Application:
             log.warning("保存配置失败: %s", exc)
         self.pet.apply_config(cfg)
         self.scheduler.apply_config(cfg)
+
+    # ---------- 形象 ----------
+
+    def _switch_sprite(self, sprite_id: str) -> None:
+        if sprite_id == self.pet.sprite_id:
+            return
+        cfg = copy.deepcopy(self.cfg)
+        cfg["pet"]["sprite"] = sprite_id
+        self._apply_config(cfg)
+        self._refresh_icon()
+
+    def _import_sprite(self) -> None:
+        sprite_id = sprite_dialog.import_flow(self.pet)
+        if sprite_id:
+            self._switch_sprite(sprite_id)
+
+    def _manage_sprites(self) -> None:
+        sprite_dialog.manage_flow(self.pet)
+        # 顺手处理"正在用的形象刚被删掉"——ensure_available 会把它退回内置
+        current = sprite_library.ensure_available(self.cfg["pet"]["sprite"])
+        if current != self.cfg["pet"]["sprite"]:
+            cfg = copy.deepcopy(self.cfg)
+            cfg["pet"]["sprite"] = current
+            self._apply_config(cfg)
+            self._refresh_icon()
+
+    def _refresh_icon(self) -> None:
+        if self.tray:
+            self.tray.refresh_icon()
 
     def _toggle_visibility(self) -> None:
         visible = not self.pet.isVisible()

@@ -1,25 +1,43 @@
-"""设置窗口 / 自启 / 气泡命中 这三块的离线冒烟。
+"""设置窗口 / 自启 / 气泡命中 / 形象素材库 这几块的离线冒烟。
 
 e2e_test.py 只跑到"调度→判定→记录",这里补上剩下没被跑到的部分:设置窗口改完
-能不能原样收回来、自启写没写对地方、气泡按钮的命中区对不对。
+能不能原样收回来、自启写没写对地方、气泡按钮的命中区对不对、导入的形象能不能
+落盘/加载/切换/删除。
 
     uv run python script/ui_test.py
 """
 
+import json
 import os
+import plistlib
+import struct
 import sys
 import tempfile
+import types
+from pathlib import Path
+
+# 从测试脚本自身推仓库根,不去问被测代码 —— 拿被测对象当基准就成了自证。
+ROOT = Path(__file__).resolve().parents[1]
 
 TMP = tempfile.mkdtemp(prefix="drink_ui_")
-os.environ["XDG_CONFIG_HOME"] = TMP
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+if sys.platform == "darwin":
+    # macOS 忽略 XDG_CONFIG_HOME,config_dir() 看的是 ~/Library/Application Support
+    os.environ["HOME"] = TMP
+else:
+    os.environ["XDG_CONFIG_HOME"] = TMP
+if sys.platform.startswith("linux"):
+    # 只有 X11/XWayland 需要钉死 xcb;macOS 上必须让 Qt 自己选 cocoa
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
-from PyQt5.QtCore import QPoint, QRect, QTime  # noqa: E402
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
+from PyQt5.QtCore import QPoint, QRect, Qt, QTime  # noqa: E402
+from PyQt5.QtGui import QBitmap, QRegion  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 
-from drink_or_not import autostart, config as config_mod  # noqa: E402
+from drink_or_not import activity, autostart, config as config_mod  # noqa: E402
+from drink_or_not import resources, sprite_convert, sprite_library  # noqa: E402
 from drink_or_not.bubble import Bubble  # noqa: E402
-from drink_or_not.pet_window import PetWindow  # noqa: E402
+from drink_or_not.pet_window import PetWindow, SpriteSet, apply_window_flags  # noqa: E402
 from drink_or_not.settings_dialog import SettingsDialog  # noqa: E402
 
 failures = []
@@ -86,13 +104,43 @@ print("\n[开机自启]")
 check(autostart.is_enabled() is False, "初始未开启")
 check(autostart.set_enabled(True) is True, "开启成功")
 check(autostart.is_enabled() is True, "开启后状态为真")
-desktop = autostart._linux_path()
-check(desktop.exists(), "写到了 autostart 目录", str(desktop))
-body = desktop.read_text(encoding="utf-8")
-check("[Desktop Entry]" in body and "Type=Application" in body, "内容含 Desktop Entry")
-check(f"Exec={autostart.install_command()}" in body, "Exec 指向本解释器", autostart.install_command())
+
+if sys.platform == "darwin":
+    # macOS 写的是 LaunchAgent plist。临时 HOME 让 _macos_path() 落在临时目录里
+    target = autostart._macos_path()
+    check(target.exists(), "写到了 LaunchAgents 目录", str(target))
+    body = plistlib.loads(target.read_bytes())
+    check(body["Label"] == autostart.MACOS_LABEL, "Label 对", str(body["Label"]))
+    check(body["RunAtLoad"] is True, "RunAtLoad 打开")
+    check(
+        body["ProgramArguments"][0] == sys.executable,
+        "ProgramArguments 指向本解释器",
+        str(body["ProgramArguments"]),
+    )
+    check(
+        body["ProgramArguments"][len(body["ProgramArguments"]) - 2 :] == ["-m", "drink_or_not"],
+        "未冻结时走模块入口",
+        str(body["ProgramArguments"]),
+    )
+else:
+    target = autostart._linux_path()
+    check(target.exists(), "写到了 autostart 目录", str(target))
+    body = target.read_text(encoding="utf-8")
+    check("[Desktop Entry]" in body and "Type=Application" in body, "内容含 Desktop Entry")
+    check(f"Exec={autostart.install_command()}" in body, "Exec 指向本解释器", autostart.install_command())
+
 check(autostart.set_enabled(False) is True, "关闭成功")
-check(not desktop.exists(), "关闭后文件被删掉")
+check(not target.exists(), "关闭后文件被删掉")
+
+# plist 的内容是纯函数,任何平台都能断言 —— 打包后路径要换成可执行文件本身
+payload = autostart.macos_plist_payload(frozen=True, executable="/Applications/drink_or_not")
+check(payload["ProgramArguments"] == ["/Applications/drink_or_not"], "冻结后不带 -m", str(payload))
+check(payload["RunAtLoad"] is True, "RunAtLoad 始终打开")
+check(payload["Label"] == autostart.MACOS_LABEL, "Label 用的是固定标识")
+check(
+    plistlib.loads(plistlib.dumps(payload)) == payload,
+    "plist 能序列化并原样读回",
+)
 
 # ---------- 气泡命中 ----------
 print("\n[气泡按钮命中]")
@@ -154,7 +202,13 @@ old_w = pet.win_w
 grow = config_mod.deep_merge(tight, {"pet": {"scale": 1.0}})
 pet.apply_config(grow)
 check(pet.win_w > old_w, "放大后窗口变宽", f"{old_w} → {pet.win_w}")
-check(pet.sprites.canvas.width() == round(428 * 1.0), "画布按 1.0 重算", str(pet.sprites.canvas.width()))
+# 跟内置 manifest 的 canvas 比,别写死数字:写死过一版 428 其实抄的是高度不是宽度
+builtin_canvas = json.loads((resources.assets_dir() / "manifest.json").read_text(encoding="utf-8"))["canvas"]
+check(
+    [pet.sprites.canvas.width(), pet.sprites.canvas.height()] == builtin_canvas,
+    "画布按 1.0 重算",
+    f"{pet.sprites.canvas.width()}x{pet.sprites.canvas.height()}",
+)
 
 # 跨屏记忆:换过显示器后保存的位置要能回落到默认位
 off_screen = config_mod.deep_merge(tight, {"pet": {"pos": [99999, 99999]}})
@@ -165,6 +219,380 @@ check(pet._on_screen(pet.pos()), "离屏坐标被纠正回可见区", str((pet.p
 before = config_mod.load()["pet"]["pos"]
 pet.save_position()
 check(config_mod.load()["pet"]["pos"] == before, "save_position 只改内存,不写盘")
+
+# ---------- 形象素材库 ----------
+print("\n[形象素材库]")
+initial = sprite_library.list_sprites()
+check(len(initial) == 1 and initial[0].id == "default", "初始只有内置形象", str([s.id for s in initial]))
+check(initial[0].builtin is True, "内置形象带 builtin 标记")
+check(sprite_library.sprite_dir("default") == resources.assets_dir(), "内置形象直接指向随包 assets")
+
+# 纯色背景 + 主体:走抠图这条路
+plain = Path(TMP) / "plain.png"
+img = Image.new("RGB", (160, 160), (255, 255, 255))
+ImageDraw.Draw(img).ellipse((40, 30, 120, 130), fill=(200, 60, 60))
+img.save(plain)
+
+prepared = sprite_convert.prepare(plain)
+check(not prepared.problems, "纯色背景抠图通过自检", "; ".join(prepared.problems))
+check(not prepared.used_alpha, "RGB 输入没走 alpha 那条路")
+check(len(prepared.frames) == sprite_convert.COUNT, "生成了 36 帧", str(len(prepared.frames)))
+
+info = sprite_library.install(prepared, "测试形象")
+check(info.id != "default", "落盘拿到新 id", info.id)
+check((sprite_library.sprite_dir(info.id) / "manifest.json").is_file(), "manifest 已写出")
+check((sprite_library.sprite_dir(info.id) / "source.png").is_file(), "原图已存档,便于重新转换")
+check(
+    len(list((sprite_library.sprite_dir(info.id) / "frames").glob("*.png"))) == sprite_convert.COUNT,
+    "帧文件数量对",
+)
+check(not list(sprite_library.sprites_root().glob("*" + sprite_library.PART_SUFFIX)), "没有残留的 .part 目录")
+
+listed = sprite_library.list_sprites()
+check(len(listed) == 2 and listed[0].id == "default", "新形象排在内置之后", str([s.id for s in listed]))
+check(listed[1].name == "测试形象", "显示名来自 manifest", listed[1].name)
+
+# 重名:目录加 -2 后缀,显示名必须跟着变,否则菜单里两个条目长得一模一样
+dup = sprite_library.install(prepared, "测试形象")
+check(dup.id != info.id, "重名拿到不同的 id", f"{info.id} / {dup.id}")
+check(dup.name == dup.id, "重名的显示名跟着 id 走", dup.name)
+check([s.name for s in sprite_library.list_sprites()] == ["魔法猫（内置）", "测试形象", dup.id], "菜单里三个名字互不相同")
+sprite_library.delete_sprite(dup.id)
+
+custom_manifest = json.loads(
+    (sprite_library.sprite_dir(info.id) / "manifest.json").read_text(encoding="utf-8")
+)
+custom = SpriteSet.load(info.id, 1.0)
+check(
+    [custom.canvas.width(), custom.canvas.height()] == custom_manifest["canvas"],
+    "自定义形象能加载,画布与 manifest 一致",
+    f"{custom.canvas.width()}x{custom.canvas.height()}",
+)
+
+# 换到自定义形象,再换回来
+pet.apply_config(config_mod.deep_merge(tight, {"pet": {"sprite": info.id}}))
+qapp.processEvents()
+check(pet.sprite_id == info.id, "宠物切到自定义形象")
+check(not pet.mask().isEmpty(), "自定义形象的遮罩非空")
+pet.apply_config(config_mod.deep_merge(tight, {"pet": {"sprite": "default"}}))
+check(pet.sprite_id == "default", "能切回内置")
+
+# 透明底 PNG:直接采用自带 alpha,跳过抠图
+clear = Path(TMP) / "clear.png"
+rgba = Image.new("RGBA", (120, 120), (0, 0, 0, 0))
+ImageDraw.Draw(rgba).rectangle((30, 30, 90, 90), fill=(20, 120, 220, 255))
+rgba.save(clear)
+with_alpha = sprite_convert.prepare(clear)
+check(with_alpha.used_alpha, "透明底 PNG 走 alpha,不抠背景")
+check(not with_alpha.problems, "自带 alpha 跳过自检")
+
+# out_max:动画帧只要 360,做图标要 1024 —— 拿小的去放大会糊,所以这个口子得真的通到抠图里
+check(max(sprite_convert.cutout_image(clear, out_max=200).size) == 200, "out_max 传到了抠图里")
+check(max(sprite_convert.cutout_image(clear).size) == sprite_convert.OUT_MAX, "不传 out_max 时仍是动画那份")
+
+# 全透明图:得明确报错,不能塞一张空图给用户
+blank = Path(TMP) / "blank.png"
+Image.new("RGBA", (40, 40), (0, 0, 0, 0)).save(blank)
+try:
+    sprite_convert.prepare(blank)
+    check(False, "全透明图应当报错")
+except sprite_convert.ConversionError as exc:
+    check(True, "全透明图报 ConversionError", str(exc))
+
+# 左红右红、中间一整条背景色:抠完剩下的两块都贴着左右边界,自检必须拦下
+band = Path(TMP) / "band.png"
+grad = Image.new("RGB", (96, 96))
+grad.putdata([(x * 255 // 95, 128, 200) for _ in range(96) for x in range(96)])
+grad.save(band)
+risky = sprite_convert.prepare(band)
+check(bool(risky.problems), "贴边的抠图结果被自检拦下", "; ".join(risky.problems))
+
+# 兜底:不抠图,整张图当形象
+whole = sprite_convert.prepare(band, whole=True)
+check(not whole.problems, "整图显示不做自检")
+whole_cut = sprite_convert.cutout_image(band, whole=True)
+check(whole_cut.getchannel("A").getextrema() == (255, 255), "整图显示的 alpha 铺满")
+
+# 重命名只改显示名,目录名(id)不许动
+sprite_library.rename_sprite(info.id, "改过名的猫")
+check(sprite_library.list_sprites()[1].name == "改过名的猫", "重命名生效")
+check(sprite_library.sprite_dir(info.id).is_dir(), "重命名没动目录名")
+try:
+    sprite_library.rename_sprite("default", "换个名")
+    check(False, "内置形象不该能重命名")
+except ValueError:
+    check(True, "内置形象拒绝重命名")
+
+try:
+    sprite_library.delete_sprite("default")
+    check(False, "内置形象不该能删")
+except ValueError:
+    check(True, "内置形象拒绝删除")
+
+check(sprite_library.ensure_available("早就不在了") == "default", "不存在的形象退回内置")
+sprite_library.delete_sprite(info.id)
+check(sprite_library.ensure_available(info.id) == "default", "删掉后自动退回内置")
+check(len(sprite_library.list_sprites()) == 1, "列表回到只剩内置")
+
+# ---------- macOS 移植:能在 Linux 上证的部分 ----------
+# 真机行为(window 失活是否隐藏、全屏浮层、托盘点击语义、Retina 遮罩)只能在 Mac 上看。
+# 这里只钉住纯逻辑,免得改了 darwin 分支却没人发现。
+print("\n[macOS 移植]")
+
+
+def provider_names(platform):
+    """假 sys.platform 下取 provider 名字。只看名字,不调用 factory —— 不碰任何 mac 框架。"""
+    real = sys.platform
+    sys.platform = platform
+    try:
+        return [name for name, _ in activity._providers()]
+    finally:
+        sys.platform = real
+
+
+darwin = provider_names("darwin")
+check(darwin[0] == "macos/CGEventSourceSecondsSinceLastEventType", "darwin 首选 CoreGraphics", str(darwin))
+check(len(darwin) == 2, "darwin 有兜底,不是单点", str(darwin))
+check(darwin[-1] == "fallback/QCursor-poll", "darwin 兜底是 QCursor 轮询", str(darwin))
+check("linux/mutter-idle-monitor" not in darwin, "darwin 不串到 Linux 的来源", str(darwin))
+linux = provider_names("linux")
+check(linux[0] == "linux/mutter-idle-monitor" and linux[-1] == "fallback/QCursor-poll", "Linux 链未受影响", str(linux))
+check("macos/CGEventSourceSecondsSinceLastEventType" not in linux, "Linux 不串到 mac 的来源", str(linux))
+
+# 探针窗口和真窗口必须共用同一份 flags,否则自检测的不是真东西
+probe = QWidget()
+apply_window_flags(probe)
+check(bool(probe.windowFlags() & Qt.FramelessWindowHint), "apply_window_flags 设上了无边框")
+check(bool(probe.windowFlags() & Qt.WindowStaysOnTopHint), "apply_window_flags 设上了置顶")
+check(bool(probe.windowFlags() & Qt.Tool), "apply_window_flags 用了 Qt.Tool(不是 Qt.Window)")
+check(probe.testAttribute(Qt.WA_TranslucentBackground), "apply_window_flags 设上了透明属性")
+# 真窗口也走了同一份 apply_window_flags。只比它独占、且不会被配置改动的两位 ——
+# WindowStaysOnTopHint 是"置顶"开关,apply_config 会按 always_on_top 把它打开/关掉,
+# 比它会误报(上面的设置窗口测试恰好把它关了)。
+shared = Qt.FramelessWindowHint | Qt.Tool
+check(
+    (pet.windowFlags() & shared) == shared,
+    "真窗口走的是同一份 flags(不是各写各的)",
+    str(int(pet.windowFlags() & shared)),
+)
+
+# ---------- macOS 残影:窗口阴影必须关掉 ----------
+# 症状是 Mac 上猫身后有一圈比它略大、位置固定、不随动画动的淡黑色轮廓。那是 macOS 给无边框
+# 窗口算的**投影**:它拿窗口的遮罩当形状,而遮罩是所有帧 alpha 的并集(_build_bubble_region),
+# 本来就比单帧大一圈、而且从头到尾不变 —— 所以那圈影子既偏大又不动。关掉窗口阴影即可。
+print("\n[macOS 残影]")
+
+check(bool(probe.windowFlags() & Qt.NoDropShadowWindowHint), "apply_window_flags 关掉了窗口阴影")
+check(
+    (pet.windowFlags() & Qt.NoDropShadowWindowHint) == Qt.NoDropShadowWindowHint,
+    "真窗口也带上了这一位(只给探针关的话真窗口照样糊影子)",
+    hex(int(pet.windowFlags())),
+)
+# 遮罩用并集是有意为之的(逐帧换遮罩会让点击区跟着乱跳),所以阴影只能从窗口这边关掉。
+# 这条断言同时把"影子的成因"钉住:哪天遮罩改成了单帧,这里会提示成因变了。
+union = pet._cat_region.boundingRect()
+single = QRegion(QBitmap.fromImage(pet.sprites.frames[0].toImage().createAlphaMask()))
+check(
+    union.width() > single.boundingRect().width(),
+    "遮罩确实比单帧大一圈(影子偏大的成因)",
+    f"并集 {union.width()}x{union.height()} vs 单帧 {single.boundingRect().width()}",
+)
+
+# darwin 那条分支在 Linux 上永远走不到,里面写错名字的话只有上 Mac 才会 AttributeError。
+# 这里把 sys.platform 骗成 darwin 真跑一遍 —— 在 Linux 上设这个属性只是置个无效的位,不会炸。
+check(hasattr(Qt, "WA_MacAlwaysShowToolWindow"), "PyQt5 里有 WA_MacAlwaysShowToolWindow")
+real_platform = sys.platform
+sys.platform = "darwin"
+try:
+    macprobe = QWidget()
+    apply_window_flags(macprobe)
+    mac_ok = macprobe.testAttribute(Qt.WA_MacAlwaysShowToolWindow)
+    mac_err = ""
+except Exception as exc:  # noqa: BLE001 — 就是要看它会不会炸
+    mac_ok, mac_err = False, repr(exc)
+finally:
+    sys.platform = real_platform
+check(mac_ok, "darwin 分支真的能跑通并设上属性", mac_err)
+# WA_MacAlwaysShowToolWindow 在 Linux 上是 no-op(平台门控),它的真实验证在 check_env 的 darwin 分支
+
+# spec 里那个 darwin 分支(BUNDLE/.app)在 Linux 上永远走不到,参数写错了只有真去 Mac 打包
+# 才会炸。用桩把三个平台各跑一遍 —— 比 grep 字符串结实,能真的发现 BUNDLE 参数写错。
+print("\n[打包 spec 的平台分派]")
+
+
+def spec_calls(platform):
+    """假 sys.platform 下执行真 spec,返回各类构建对象的调用参数。
+
+    必须把假 sys 塞进 sys.modules:spec 顶部自己 `import sys`,只改 globals 会被它覆盖。
+    """
+    captured = {}
+
+    class Stub:
+        def __init__(self, *a, **k):
+            self.k = k
+            captured.setdefault(type(self).__name__, []).append(k)
+
+    class Analysis(Stub):
+        pure, scripts, binaries, datas = [], [], [], []
+
+    class PYZ(Stub):
+        pass
+
+    class EXE(Stub):
+        pass
+
+    class BUNDLE(Stub):
+        pass
+
+    fake = types.ModuleType("sys")
+    fake.platform = platform
+    fake.frozen = False
+    real_module = sys.modules["sys"]
+    sys.modules["sys"] = fake
+    try:
+        globs = {
+            "SPECPATH": str(ROOT / "build"),
+            "Analysis": Analysis,
+            "PYZ": PYZ,
+            "EXE": EXE,
+            "BUNDLE": BUNDLE,
+        }
+        exec(compile((ROOT / "build" / "drink_or_not.spec").read_text(encoding="utf-8"), "spec", "exec"), globs)
+    finally:
+        sys.modules["sys"] = real_module
+    return captured
+
+
+linux_spec = spec_calls("linux")
+check(linux_spec["Analysis"][0]["hiddenimports"] == ["PyQt5.QtDBus"], "Linux 收 QtDBus(空闲检测要用)")
+check("BUNDLE" not in linux_spec, "Linux 不产 .app 外壳")
+
+win_spec = spec_calls("win32")
+check(win_spec["Analysis"][0]["hiddenimports"] == [], "Windows 不收 QtDBus(没有 session bus)")
+check("BUNDLE" not in win_spec, "Windows 不产 .app 外壳")
+
+mac_spec = spec_calls("darwin")
+check("BUNDLE" in mac_spec, "darwin 走 BUNDLE 产 .app")
+if "BUNDLE" in mac_spec:
+    bundle = mac_spec["BUNDLE"][0]
+    check(bundle["name"] == "drink_or_not.app", "外壳名是 drink_or_not.app", str(bundle.get("name")))
+    check(
+        bundle["bundle_identifier"] == autostart.MACOS_LABEL,
+        "bundle id 和 LaunchAgent Label 同一域名",
+        f'{bundle.get("bundle_identifier")} vs {autostart.MACOS_LABEL}',
+    )
+    # Retina:少了这条整个应用跑在低分辨率放大模式,猫是糊的,而且只有肉眼看得出来
+    check(
+        bundle["info_plist"].get("NSHighResolutionCapable") is True,
+        "info_plist 声明了 NSHighResolutionCapable(Retina)",
+    )
+check(mac_spec["Analysis"][0]["hiddenimports"] == [], "macOS 不收 QtDBus(没有 session bus)")
+
+# ---------- 打包:应用图标 ----------
+# 图标由 Pillow 现做(仓库里不存二进制),整条链路在 Linux 上就能跑完 —— 所以图标长什么
+# 样、.icns 结构对不对,都不必等上 Mac 才发现不对。Pillow 的 icns 编码器是这条路线的地基,
+# 它要是写不出那八个尺寸,Mac 上的图标就是糊的甚至不显示,所以这里连文件结构一起钉住。
+print("\n[打包:应用图标]")
+
+sys.path.insert(0, str(ROOT / "script"))
+import make_icon  # noqa: E402
+
+# 拿一张铺满画布的方图当主体:结果四角必须还是透明的,那才说明"圆角方块"这刀真裁上去了
+# (直接拿方图当 .app 图标,Dock 里就是个贴上去的色板 —— 这是 macOS 图标最容易踩的坑)
+fill = Image.new("RGBA", (256, 256), (200, 30, 30, 255))
+icon = make_icon.build_icon(fill, (248, 248, 236))
+check(icon.size == (make_icon.CANVAS, make_icon.CANVAS), "图标是 1024 画布", str(icon.size))
+check(icon.mode == "RGBA", "图标带 alpha 通道", icon.mode)
+corner = [(2, 2), (make_icon.CANVAS - 3, 2), (2, make_icon.CANVAS - 3), (make_icon.CANVAS - 3, make_icon.CANVAS - 3)]
+check(all(icon.getpixel(p)[3] == 0 for p in corner), "四角透明,不是一张方图", str([icon.getpixel(p)[3] for p in corner]))
+mid = make_icon.CANVAS // 2
+check(icon.getpixel((mid, mid)) == (200, 30, 30, 255), "主体画在方块正中", str(icon.getpixel((mid, mid))))
+
+# 主体小的时候露出来的必须是底色(取自原图自己的背景色),而且主体要居中
+small = make_icon.build_icon(Image.new("RGBA", (4, 4), (0, 200, 0, 255)), (248, 248, 236))
+check(small.getpixel((make_icon.MARGIN + 20, mid))[:3] == (248, 248, 236), "露出来的是原图的背景色")
+check(small.getpixel((mid, mid))[:3] == (0, 200, 0), "主体居中")
+check(small.getpixel((make_icon.CANVAS - 1, make_icon.CANVAS - 1))[3] == 0, "方块外面是透明的")
+
+with tempfile.TemporaryDirectory(prefix="drink_icon_") as tmp:
+    icns = Path(tmp) / "icon.icns"
+    icon.save(icns, format="ICNS")
+    data = icns.read_bytes()
+    check(data[:4] == b"icns", "写出的是 icns 容器", str(data[:4]))
+    check(struct.unpack(">i", data[4:8])[0] == len(data), "icns 声明的长度和文件实际长度一致")
+    toc = struct.unpack(">i", data[12:16])[0]
+    kinds = {data[i : i + 4].decode() for i in range(16, 16 + toc - 8, 8)}
+    want = {"ic07", "ic08", "ic09", "ic10", "ic11", "ic12", "ic13", "ic14"}
+    check(kinds == want, "八个尺寸一个不少(缺了 Dock 里就会糊)", str(sorted(kinds)))
+    check(Image.open(icns).size == (make_icon.CANVAS, make_icon.CANVAS), "Pillow 能读回来,最大那张是 1024")
+
+# 图标是 darwin 专属:Linux 的 ELF 没有图标这回事(.desktop 自己带),Windows 要的是 .ico
+check(mac_spec["EXE"][0]["icon"].endswith("icon.icns"), "darwin 给可执行文件也传了图标", str(mac_spec["EXE"][0]["icon"]))
+check(mac_spec["BUNDLE"][0]["icon"].endswith("icon.icns"), "darwin 给 .app 传了图标", str(mac_spec["BUNDLE"][0]["icon"]))
+check(linux_spec["EXE"][0]["icon"] is None, "Linux 不传图标")
+check(win_spec["EXE"][0]["icon"] is None, "Windows 不传图标(这条路线没做 .ico)")
+
+# ---------- 打包路线:assets 必须能跟着 wheel 走 ----------
+# uvbox / uv tool install 装出来的目录里没有仓库根的 assets/,全靠 pyproject.toml 的
+# force-include 把它映射进包内。这里把三种布局都摆出来,钉住 assets_dir() 的解析顺序。
+print("\n[打包:assets 随包]")
+
+
+def assets_dir_as(package_file, meipass=None):
+    """把 resources.__file__(必要时还有 sys._MEIPASS)指到别处,看 assets_dir() 解析到哪。"""
+    real_file = resources.__file__
+    had_meipass = hasattr(sys, "_MEIPASS")
+    real_meipass = getattr(sys, "_MEIPASS", None)
+    resources.__file__ = str(package_file)
+    if meipass is not None:
+        sys._MEIPASS = str(meipass)
+    elif had_meipass:
+        del sys._MEIPASS
+    try:
+        return resources.assets_dir()
+    finally:
+        resources.__file__ = real_file
+        if had_meipass:
+            sys._MEIPASS = real_meipass
+        elif meipass is not None:
+            del sys._MEIPASS
+
+
+# 1) 仓库检出的现状:包目录里没有 assets/,应当落到仓库根。
+#    这条同时防住"packaged 分支误判" —— 判错了会把源码运行也带偏。
+check(resources.assets_dir() == ROOT / "assets", "源码运行时解析到仓库根 assets")
+check((resources.assets_dir() / "manifest.json").is_file(), "仓库根那份确实有 manifest.json")
+
+# 2) wheel 装出来的布局:assets 在包内,靠 __file__ 找到,不依赖 cwd。
+with tempfile.TemporaryDirectory(prefix="drink_pkg_") as pkg:
+    pkg = Path(pkg)
+    (pkg / "assets" / "frames").mkdir(parents=True)
+    (pkg / "assets" / "manifest.json").write_text("{}", encoding="utf-8")
+    (pkg / "resources.py").write_text("", encoding="utf-8")
+    check(assets_dir_as(pkg / "resources.py") == pkg / "assets", "装出来的包能靠 __file__ 找到 assets")
+
+# 3) 冻结(PyInstaller):_MEIPASS 优先于包内那份。
+with tempfile.TemporaryDirectory(prefix="drink_frozen_") as frozen, tempfile.TemporaryDirectory(
+    prefix="drink_pkg_"
+) as pkg:
+    frozen, pkg = Path(frozen), Path(pkg)
+    (frozen / "assets").mkdir(parents=True)
+    (frozen / "assets" / "manifest.json").write_text("{}", encoding="utf-8")
+    (pkg / "assets").mkdir(parents=True)
+    (pkg / "assets" / "manifest.json").write_text("{}", encoding="utf-8")
+    (pkg / "resources.py").write_text("", encoding="utf-8")
+    check(
+        assets_dir_as(pkg / "resources.py", meipass=frozen) == frozen / "assets",
+        "冻结时 _MEIPASS 优先",
+    )
+
+# force-include 是上面第 2 条成立的唯一前提,被删掉的话只有真去 uvbox 打包才会发现。
+# 这里不做真实构建(太慢),只确认声明还在 —— 标签如实写成"声明"。
+pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+check(
+    '[tool.hatch.build.targets.wheel.force-include]' in pyproject and '"assets" = "drink_or_not/assets"' in pyproject,
+    "pyproject 里声明了 assets 的 force-include",
+)
 
 print()
 if failures:

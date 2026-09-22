@@ -5,15 +5,11 @@ description = "桌面宠物:一只持剑魔法猫,定时提醒你喝水、上厕
 requires-python = ">=3.9,<3.10"
 dependencies = [
     "PyQt5>=5.15.9,<5.16",
+    "pillow>=9.5",  # 导入自定义形象要在运行时抠图,不再只是打包脚本的依赖
 ]
 
 [project.scripts]
 drink-or-not = "drink_or_not.__main__:main"
-
-[dependency-groups]
-dev = [
-    "pillow>=9.5",
-]
 
 [build-system]
 requires = ["hatchling"]
@@ -21,3 +17,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/drink_or_not"]
+
+# 素材要跟着 wheel 走:uvbox 那条路(以及任何 uv tool install 装法)不会把仓库根的 assets/
+# 带进安装目录,而应用没有它就直接弹"缺少 assets"起不来。映射进包内目录是为了让
+# resources.assets_dir() 能靠 __file__ 找到它,仓库布局本身不动。
+[tool.hatch.build.targets.wheel.force-include]
+"assets" = "drink_or_not/assets"
