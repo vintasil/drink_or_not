@@ -10,6 +10,7 @@ e2e_test.py 只跑到"调度→判定→记录",这里补上剩下没被跑到�
 import json
 import os
 import plistlib
+import struct
 import sys
 import tempfile
 import types
@@ -30,6 +31,7 @@ if sys.platform.startswith("linux"):
 
 from PIL import Image, ImageDraw  # noqa: E402
 from PyQt5.QtCore import QPoint, QRect, Qt, QTime  # noqa: E402
+from PyQt5.QtGui import QBitmap, QRegion  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from drink_or_not import activity, autostart, config as config_mod  # noqa: E402
@@ -284,6 +286,10 @@ with_alpha = sprite_convert.prepare(clear)
 check(with_alpha.used_alpha, "透明底 PNG 走 alpha,不抠背景")
 check(not with_alpha.problems, "自带 alpha 跳过自检")
 
+# out_max:动画帧只要 360,做图标要 1024 —— 拿小的去放大会糊,所以这个口子得真的通到抠图里
+check(max(sprite_convert.cutout_image(clear, out_max=200).size) == 200, "out_max 传到了抠图里")
+check(max(sprite_convert.cutout_image(clear).size) == sprite_convert.OUT_MAX, "不传 out_max 时仍是动画那份")
+
 # 全透明图:得明确报错,不能塞一张空图给用户
 blank = Path(TMP) / "blank.png"
 Image.new("RGBA", (40, 40), (0, 0, 0, 0)).save(blank)
@@ -368,6 +374,28 @@ check(
     (pet.windowFlags() & shared) == shared,
     "真窗口走的是同一份 flags(不是各写各的)",
     str(int(pet.windowFlags() & shared)),
+)
+
+# ---------- macOS 残影:窗口阴影必须关掉 ----------
+# 症状是 Mac 上猫身后有一圈比它略大、位置固定、不随动画动的淡黑色轮廓。那是 macOS 给无边框
+# 窗口算的**投影**:它拿窗口的遮罩当形状,而遮罩是所有帧 alpha 的并集(_build_bubble_region),
+# 本来就比单帧大一圈、而且从头到尾不变 —— 所以那圈影子既偏大又不动。关掉窗口阴影即可。
+print("\n[macOS 残影]")
+
+check(bool(probe.windowFlags() & Qt.NoDropShadowWindowHint), "apply_window_flags 关掉了窗口阴影")
+check(
+    (pet.windowFlags() & Qt.NoDropShadowWindowHint) == Qt.NoDropShadowWindowHint,
+    "真窗口也带上了这一位(只给探针关的话真窗口照样糊影子)",
+    hex(int(pet.windowFlags())),
+)
+# 遮罩用并集是有意为之的(逐帧换遮罩会让点击区跟着乱跳),所以阴影只能从窗口这边关掉。
+# 这条断言同时把"影子的成因"钉住:哪天遮罩改成了单帧,这里会提示成因变了。
+union = pet._cat_region.boundingRect()
+single = QRegion(QBitmap.fromImage(pet.sprites.frames[0].toImage().createAlphaMask()))
+check(
+    union.width() > single.boundingRect().width(),
+    "遮罩确实比单帧大一圈(影子偏大的成因)",
+    f"并集 {union.width()}x{union.height()} vs 单帧 {single.boundingRect().width()}",
 )
 
 # darwin 那条分支在 Linux 上永远走不到,里面写错名字的话只有上 Mac 才会 AttributeError。
@@ -459,6 +487,50 @@ if "BUNDLE" in mac_spec:
         "info_plist 声明了 NSHighResolutionCapable(Retina)",
     )
 check(mac_spec["Analysis"][0]["hiddenimports"] == [], "macOS 不收 QtDBus(没有 session bus)")
+
+# ---------- 打包:应用图标 ----------
+# 图标由 Pillow 现做(仓库里不存二进制),整条链路在 Linux 上就能跑完 —— 所以图标长什么
+# 样、.icns 结构对不对,都不必等上 Mac 才发现不对。Pillow 的 icns 编码器是这条路线的地基,
+# 它要是写不出那八个尺寸,Mac 上的图标就是糊的甚至不显示,所以这里连文件结构一起钉住。
+print("\n[打包:应用图标]")
+
+sys.path.insert(0, str(ROOT / "script"))
+import make_icon  # noqa: E402
+
+# 拿一张铺满画布的方图当主体:结果四角必须还是透明的,那才说明"圆角方块"这刀真裁上去了
+# (直接拿方图当 .app 图标,Dock 里就是个贴上去的色板 —— 这是 macOS 图标最容易踩的坑)
+fill = Image.new("RGBA", (256, 256), (200, 30, 30, 255))
+icon = make_icon.build_icon(fill, (248, 248, 236))
+check(icon.size == (make_icon.CANVAS, make_icon.CANVAS), "图标是 1024 画布", str(icon.size))
+check(icon.mode == "RGBA", "图标带 alpha 通道", icon.mode)
+corner = [(2, 2), (make_icon.CANVAS - 3, 2), (2, make_icon.CANVAS - 3), (make_icon.CANVAS - 3, make_icon.CANVAS - 3)]
+check(all(icon.getpixel(p)[3] == 0 for p in corner), "四角透明,不是一张方图", str([icon.getpixel(p)[3] for p in corner]))
+mid = make_icon.CANVAS // 2
+check(icon.getpixel((mid, mid)) == (200, 30, 30, 255), "主体画在方块正中", str(icon.getpixel((mid, mid))))
+
+# 主体小的时候露出来的必须是底色(取自原图自己的背景色),而且主体要居中
+small = make_icon.build_icon(Image.new("RGBA", (4, 4), (0, 200, 0, 255)), (248, 248, 236))
+check(small.getpixel((make_icon.MARGIN + 20, mid))[:3] == (248, 248, 236), "露出来的是原图的背景色")
+check(small.getpixel((mid, mid))[:3] == (0, 200, 0), "主体居中")
+check(small.getpixel((make_icon.CANVAS - 1, make_icon.CANVAS - 1))[3] == 0, "方块外面是透明的")
+
+with tempfile.TemporaryDirectory(prefix="drink_icon_") as tmp:
+    icns = Path(tmp) / "icon.icns"
+    icon.save(icns, format="ICNS")
+    data = icns.read_bytes()
+    check(data[:4] == b"icns", "写出的是 icns 容器", str(data[:4]))
+    check(struct.unpack(">i", data[4:8])[0] == len(data), "icns 声明的长度和文件实际长度一致")
+    toc = struct.unpack(">i", data[12:16])[0]
+    kinds = {data[i : i + 4].decode() for i in range(16, 16 + toc - 8, 8)}
+    want = {"ic07", "ic08", "ic09", "ic10", "ic11", "ic12", "ic13", "ic14"}
+    check(kinds == want, "八个尺寸一个不少(缺了 Dock 里就会糊)", str(sorted(kinds)))
+    check(Image.open(icns).size == (make_icon.CANVAS, make_icon.CANVAS), "Pillow 能读回来,最大那张是 1024")
+
+# 图标是 darwin 专属:Linux 的 ELF 没有图标这回事(.desktop 自己带),Windows 要的是 .ico
+check(mac_spec["EXE"][0]["icon"].endswith("icon.icns"), "darwin 给可执行文件也传了图标", str(mac_spec["EXE"][0]["icon"]))
+check(mac_spec["BUNDLE"][0]["icon"].endswith("icon.icns"), "darwin 给 .app 传了图标", str(mac_spec["BUNDLE"][0]["icon"]))
+check(linux_spec["EXE"][0]["icon"] is None, "Linux 不传图标")
+check(win_spec["EXE"][0]["icon"] is None, "Windows 不传图标(这条路线没做 .ico)")
 
 # ---------- 打包路线:assets 必须能跟着 wheel 走 ----------
 # uvbox / uv tool install 装出来的目录里没有仓库根的 assets/,全靠 pyproject.toml 的

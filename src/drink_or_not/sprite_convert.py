@@ -214,9 +214,9 @@ def largest_component(fg, w, h):
 # ---------- 两条抠图路径 ----------
 
 
-def _fit(source: Image.Image, alpha: Image.Image) -> Image.Image:
-    """把裁到包围盒的 (RGB, alpha) 一起缩到 OUT_MAX,返回 RGBA。"""
-    ratio = OUT_MAX / max(source.size)
+def _fit(source: Image.Image, alpha: Image.Image, out_max: int) -> Image.Image:
+    """把裁到包围盒的 (RGB, alpha) 一起缩到 out_max,返回 RGBA。"""
+    ratio = out_max / max(source.size)
     out_size = (max(1, round(source.width * ratio)), max(1, round(source.height * ratio)))
     rgb = source.resize(out_size, Image.LANCZOS)
     # 遮罩要用 BOX:对二值覆盖率来说它才是正解,LANCZOS 的负瓣会让边缘产生振铃
@@ -224,7 +224,7 @@ def _fit(source: Image.Image, alpha: Image.Image) -> Image.Image:
     return Image.merge("RGBA", (*rgb.split(), soft))
 
 
-def _cutout_from_alpha(rgba: Image.Image) -> Image.Image:
+def _cutout_from_alpha(rgba: Image.Image, out_max: int) -> Image.Image:
     """输入自带可用的 alpha,直接拿它当遮罩。
 
     不做反混合:真实 alpha 图的 RGB 本来就是前景色,不是"和某个背景色混出来的",
@@ -234,10 +234,10 @@ def _cutout_from_alpha(rgba: Image.Image) -> Image.Image:
     box = alpha.getbbox()
     if box is None:
         raise ConversionError("这张图整个都是透明的,没有可见内容。")
-    return _fit(rgba.convert("RGB").crop(box), alpha.crop(box))
+    return _fit(rgba.convert("RGB").crop(box), alpha.crop(box), out_max)
 
 
-def _cutout_by_chroma(rgb: Image.Image, progress: Progress = None) -> Tuple[Image.Image, dict]:
+def _cutout_by_chroma(rgb: Image.Image, progress: Progress = None, out_max: int = OUT_MAX) -> Tuple[Image.Image, dict]:
     """原脚本的抠图链路。返回成品和一份诊断。"""
     ow, oh = rgb.size
 
@@ -278,7 +278,7 @@ def _cutout_by_chroma(rgb: Image.Image, progress: Progress = None) -> Tuple[Imag
     )
     alpha_crop = mask_img.crop(box)
 
-    ratio = OUT_MAX / max(src_crop.size)
+    ratio = out_max / max(src_crop.size)
     out_size = (max(1, round(src_crop.width * ratio)), max(1, round(src_crop.height * ratio)))
     out_rgb = src_crop.resize(out_size, Image.LANCZOS)
     out_alpha = alpha_crop.resize(out_size, Image.BOX)
@@ -305,9 +305,9 @@ def _cutout_by_chroma(rgb: Image.Image, progress: Progress = None) -> Tuple[Imag
     return Image.merge("RGBA", (*out_rgb.split(), out_alpha)), stats
 
 
-def _whole_image(rgba: Image.Image) -> Image.Image:
+def _whole_image(rgba: Image.Image, out_max: int) -> Image.Image:
     """兜底:不抠图,整张图连同背景一起当形象。"""
-    ratio = OUT_MAX / max(rgba.size)
+    ratio = out_max / max(rgba.size)
     out_size = (max(1, round(rgba.width * ratio)), max(1, round(rgba.height * ratio)))
     scaled = rgba.resize(out_size, Image.LANCZOS)
     # alpha 铺满 —— 用户要的就是"整块图",留着原来的半透明反而奇怪
@@ -393,7 +393,7 @@ def _shrink_source(src: Image.Image) -> Image.Image:
 # ---------- 对外流程 ----------
 
 
-def _analyze(src_path, *, whole: bool, progress: Progress):
+def _analyze(src_path, *, whole: bool, progress: Progress, out_max: int = OUT_MAX):
     """读图 -> 抠出透明底主体。返回 (RGBA, 是否用了自带 alpha, 自检问题, 原图 RGBA)。"""
     try:
         with Image.open(src_path) as raw:
@@ -405,21 +405,25 @@ def _analyze(src_path, *, whole: bool, progress: Progress):
     if whole:
         # "整图显示"是用户明确选的兜底,自检没有意义 —— 结果长什么样是可以预期的
         _say(progress, "按整图处理,不做抠图")
-        return _whole_image(rgba), False, [], rgba
+        return _whole_image(rgba, out_max), False, [], rgba
 
     alpha = rgba.getchannel("A")
     if alpha.getextrema() != (255, 255):
         _say(progress, "输入自带 alpha,直接采用,跳过抠图")
-        return _cutout_from_alpha(rgba), True, [], rgba
+        return _cutout_from_alpha(rgba, out_max), True, [], rgba
 
     _say(progress, "输入没有 alpha,开始抠背景")
-    cut, stats = _cutout_by_chroma(rgba.convert("RGB"), progress)
+    cut, stats = _cutout_by_chroma(rgba.convert("RGB"), progress, out_max)
     return cut, False, _judge(stats), rgba
 
 
-def cutout_image(src_path, *, whole: bool = False, progress: Progress = None) -> Image.Image:
-    """只要抠好的那张 RGBA,不管动画。`script/prepare_assets.py` 走这条。"""
-    cut, _, _, _ = _analyze(src_path, whole=whole, progress=progress)
+def cutout_image(src_path, *, whole: bool = False, progress: Progress = None, out_max: int = OUT_MAX) -> Image.Image:
+    """只要抠好的那张 RGBA,不管动画。`script/prepare_assets.py` 走这条。
+
+    out_max 默认就是动画用的 OUT_MAX。做图标时才需要更大的 —— 图标最大要 1024,
+    拿 360 的抠图去放大会糊。遮罩本身是按 MASK_MAX 算的,再往上调只是白放大,没有意义。
+    """
+    cut, _, _, _ = _analyze(src_path, whole=whole, progress=progress, out_max=out_max)
     return cut
 
 

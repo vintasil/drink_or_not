@@ -6,6 +6,10 @@
 setMask 用的是 createAlphaMask(),它把 alpha>0 的像素全部算进来(实测遮罩覆盖
 窗口 32% 面积,恰好等于图像 alpha 非零像素的占比),所以抗锯齿的边缘不会被裁掉,
 不需要额外膨胀。
+
+遮罩取的是**所有帧的并集**而不是当前帧:逐帧换遮罩会让点击区跟着动画一起跳。
+代价是它的形状比单帧大一圈 —— macOS 拿这个形状去算窗口投影,于是猫身后会多出一圈
+位置固定、不随动画动的淡黑色轮廓。所以那边必须关掉窗口阴影,见 apply_window_flags。
 """
 
 import json
@@ -34,7 +38,14 @@ def apply_window_flags(win) -> None:
     别的东西。必须在窗口第一次 show() 之前调用:WA_MacAlwaysShowToolWindow 是在
     QWidgetPrivate::create() 里被复制到 QWindow 属性上的,晚于创建就没作用了。
     """
-    win.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+    # NoDropShadowWindowHint 是 macOS 上必须的:系统会给无边框窗口算一层投影,而算阴影用的
+    # 是窗口的**遮罩**(见 _build_bubble_region,那是所有帧 alpha 的并集)。于是屏幕上会出现
+    # 一圈比猫略大、位置固定、不会随动画动的淡黑色轮廓 —— 看着就像猫身后糊了个影子。
+    # 桌面宠物本来也不该投窗口阴影,直接关掉。Linux/Windows 上这一位不生效,setMask 那一套
+    # 不受影响。
+    win.setWindowFlags(
+        Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.NoDropShadowWindowHint
+    )
     win.setAttribute(Qt.WA_TranslucentBackground)
     if sys.platform == "darwin":
         # Qt.Tool 在 macOS 上是 NSPanel;不设这个属性的话,应用一失活(用户切到别的 App)

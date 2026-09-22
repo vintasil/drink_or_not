@@ -31,6 +31,11 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# 图标由 script/make_icon.py 从 pic/cat/magic_cat.png 现做,仓库里不存二进制,
+# build_macos.sh 会在打包前先跑一遍。Linux 的 ELF 没有"图标"这回事(.desktop 自己带),
+# 所以只在 darwin 传;传了也不看,反而多一个"文件不存在"的坑。
+ICON = str(ROOT / "build" / "icon.icns") if sys.platform == "darwin" else None
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -42,7 +47,7 @@ exe = EXE(
     strip=False,
     upx=False,  # UPX 压过的 Qt 库偶发加载失败,不值得省这点体积
     console=False,
-    icon=None,
+    icon=ICON,
 )
 
 if sys.platform == "darwin":
@@ -51,7 +56,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         exe,
         name="drink_or_not.app",
-        icon=None,  # 没做 .icns:要图标得在 Mac 上用 iconutil 生成,本次没做,用的是系统默认
+        icon=ICON,  # Dock / Finder 里显示的就是它;少了这条是 PyInstaller 自带的默认图标
         # 和 autostart 的 LaunchAgent Label 同一域名,免得同一个东西有两个身份
         bundle_identifier="com.drinkornot",
         info_plist={

@@ -16,6 +16,9 @@
 # 跑 .app 内部那个可执行文件是为了拿到终端输出;macOS 仍会按路径认出它属于这个 bundle。
 # 想验"双击"那条路:  open dist/drink_or_not.app
 #
+# 图标(Dock / Finder 里那个)来自 script/make_icon.py,源头是 pic/cat/magic_cat.png。
+# 想换图就覆盖那张原图、想改形状就改脚本里的尺寸常量;改完先看 build/icon.png 再打包。
+#
 # 构建报 codesign / xcrun 相关错 -> 先装 Command Line Tools 再重来:
 #   xcode-select --install
 
@@ -29,6 +32,9 @@ uv sync
 echo "==> 生成素材(已存在则跳过)"
 [ -f assets/manifest.json ] || uv run python script/prepare_assets.py
 [ -f assets/frames/idle_00.png ] || uv run python script/generate_frames.py
+
+echo "==> 生成图标(.icns 是派生文件,不进仓库,每次现做)"
+uv run python script/make_icon.py
 
 echo "==> PyInstaller 打包"
 uv run --with pyinstaller pyinstaller "$ROOT/build/drink_or_not.spec" \

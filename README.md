@@ -192,6 +192,28 @@ Info.plist 里两个值得知道的点:
 - **刻意没加 `LSUIElement`**(「不进 Dock」那个开关)。它会改掉激活策略,设置窗口还能不能正常
   拿到焦点只能在真机上验。先按普通 App 出,虚拟机结果出来再决定要不要翻。
 
+### 换图标
+
+Dock 和 Finder 里那个图标来自 `pic/cat/magic_cat.png`,由 `script/make_icon.py` 现场合成
+(`build_macos.sh` 打包前自动跑一遍,**仓库里不存图标二进制** —— 它是原图的派生物)。
+
+```bash
+uv run python script/make_icon.py     # → build/icon.icns(打包用)+ build/icon.png(预览)
+```
+
+先打开 `build/icon.png` 看一眼再打包。合成和 .icns 编码都只用 Pillow,所以**图标长什么样在
+Linux 上就验收得了**,不必等 Mac 那边打包出来。
+
+想换图就覆盖 `pic/cat/magic_cat.png`;想换形状(留白、圆角、投影)改脚本顶部那几个常量。
+两点值得知道:
+
+- **macOS 的 .app 图标不是一张方图**,是"四周留白 + 圆角方块",方块边长约占画布八成。脚本按
+  Apple 的模板尺寸合成(1024 画布 / 824 见方 / 圆角 185),直接把方图当图标的话,Dock 里就是
+  一块贴上去的色板。方块底下还垫了一层柔和投影。
+- 主体走的是和导入形象**同一份** `sprite_convert` 抠图(只是把 `out_max` 提到 1024,免得拿
+  动画那份 360 的去放大),所以原图的水印会被当碎块丢掉;方块的底色直接取原图自己的背景色,
+  图标看着就是"这张画裁成图标形状"。
+
 ### 在 Ubuntu 上产出 macOS 产物:uvbox 路线
 
 上面那份 `build_macos.sh` 必须在 Mac 上跑。如果手边只有 Ubuntu、想先把产物递给 Mac 试,
@@ -286,10 +308,19 @@ uv run python script/generate_frames.py  # 绕底部 pivot 摇摆 → assets/fra
    `pet_window.apply_window_flags()` 里,`script/check_env.py` 的探针窗口也走同一份。
    **不要改成 `Qt.Window`**:那是普通 `NSWindow`,拿不到 `NSWindowStyleMaskNonactivatingPanel`,
    反而连"不抢焦点"都做不到。(本条此前写反了。)
+   同一处还必须带 `Qt.NoDropShadowWindowHint`,否则猫身后会多一圈淡黑色的影子,原因见下。
    已知仍未处理:进入别的 App 的全屏空间时猫会看不见 —— 那需要额外调
    `NSWindowCollectionBehaviorCanJoinAllSpaces`,尚未验证。
    macOS 上还有一批只能上真机才能确认的项(失活不隐藏、托盘左键语义、Retina 遮罩对齐、
    自启是否真被 launchd 拾取等),见 `script/check_env.py` 末尾打印的肉眼核对清单。
+6. **macOS 上猫身后的那圈影子是窗口投影,不是没擦干净的旧像素。** 症状:猫背后一圈比它略大、
+   **位置固定、不随动画动**的淡黑色轮廓。macOS 会给无边框窗口算一层投影,而算阴影用的形状是
+   窗口的**遮罩** —— 那玩意是所有帧 alpha 的并集(`_build_bubble_region`,逐帧换遮罩会让点击区
+   跟着乱跳,所以有意取的并集),本来就比单帧大一圈且从头到尾不变。于是影子既偏大又不动,
+   而且因为窗口是透的,它从猫周围的透明区里透出来,看得清清楚楚。
+   修法是**关掉窗口阴影**(`Qt.NoDropShadowWindowHint`)—— 桌面宠物本来也不该投窗口阴影。
+   注意别再顺手加"把脏区擦成透明":那个改法是在猜后备存储有残留,和这里的成因没关系。
+   判断依据很好认:**位置固定的就是投影,跟着猫一起动的才是残留像素。**
 6. **XScreenSaver 在 XWayland 下彻底不可用**:XWayland 的 X server 没编
    `MIT-SCREEN-SAVER` 扩展,`XScreenSaverQueryInfo` 调用"成功"但 idle 恒为 0;`QCursor.pos()`
    轮询也不反映桌面级输入。所以空闲检测走 **QtDBus**(PyQt5 自带,零额外依赖)调

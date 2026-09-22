@@ -263,6 +263,9 @@ EYEBALL_CHECKLIST = (
     "6. 猫的边缘清晰吗?拖动时命中区跟手吗?(Retina 遮罩对齐;糊的话先查 NSHighResolutionCapable)",
     "7. 把猫拖到另一块屏上 -> 位置对吗?重开应用后位置还在吗?",
     "8. 双击 .app 能直接开吗?被 Gatekeeper 拦的话,右键->「打开」放行一次看看还拦不拦",
+    "9. 猫身后还有没有一圈比它略大、位置固定、不随动画动的淡黑色轮廓?那是最初那版 macOS 上的"
+    "残影(系统按遮罩给窗口算的投影)。已经用 Qt.NoDropShadowWindowHint 关掉了,若又冒出来,"
+    "先看 apply_window_flags 里这位还在不在",
 )
 
 

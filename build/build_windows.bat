@@ -1,3 +1,4 @@
+$content = @'
 @echo off
 REM 在 Windows 上打成 dist\drink_or_not.exe。
 REM
@@ -22,3 +23,8 @@ echo.
 echo 产物: %CD%\dist\drink_or_not.exe
 echo 自测: %CD%\dist\drink_or_not.exe --debug-idle
 endlocal
+'@
+
+$path = Join-Path (Get-Location) "build\build_windows.bat"
+[System.IO.File]::WriteAllText($path, $content, [System.Text.Encoding]::GetEncoding("GBK"))
+Write-Host "已写入 $path"
