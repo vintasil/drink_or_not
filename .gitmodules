@@ -1,3 +1,0 @@
-[submodule "pet_backend"]
-	path = pet_backend
-	url = https://github.com/vintasil/pet_backend.git
